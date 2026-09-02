@@ -26,7 +26,7 @@ raw fragments only where detail is actually needed.
 | Python + PySpice + ngspice | the venv interpreter that has PySpice (here: `~/.venvs/pyspice/Scripts/python.exe`) |
 | Libraries | `<skill>/lib/` |
 | Technology models | `<skill>/models/` - if empty, run `scripts/fetch_models.py` |
-| Verifiers | `scripts/analog_selftest.py`, `test_parser.py`, `test_digest.py`, `test_integration.py` |
+| Verifiers | `scripts/analog_selftest.py`, `test_parser.py`, `test_digest.py`, `test_integration.py`, `test_translate.py` |
 
 Always use that interpreter; PySpice is not on the system Python. If anything
 looks broken, run `scripts/analog_selftest.py` - it checks 13 groups of results
@@ -37,6 +37,7 @@ import sys; sys.path.insert(0, '<skill>/lib')   # here: ~/.claude/skills/aspice/
 from analog_spice import *              # analog design
 import spectre_netlist as SN            # ADE netlist parse / edit / write
 import netlist_digest as ND             # compact views of a big netlist
+import spectre_to_ngspice as TR         # translate, simulate, tune, re-export
 ```
 
 Import `analog_spice` **instead of** importing PySpice directly - it repairs
@@ -144,6 +145,23 @@ Only then reach for detail: `ND.show_subckt(nl, 'amp')`,
 **Round-trip is guaranteed.** `write_netlist(parse_netlist(text))` is
 byte-identical, and an edit changes only the affected line. That is what makes
 re-exporting a configured ADE netlist safe.
+
+## Simulate and tune a netlist
+
+`spectre_to_ngspice` closes the loop: read an ADE netlist, hit a target, export
+a configured one.
+
+| Task | Call |
+|---|---|
+| Spectre IR to an ngspice deck | `tr = translate(nl)`; read `tr.warnings` and `tr.unsupported` |
+| Simulate a netlist or deck | `simulate(nl_or_deck)` |
+| Hit a target by moving a knob | `tune(nl, knobs, targets)` |
+| Write the result back | `apply_tuned(nl, knobs)`, then `SN.write_netlist(nl)` |
+
+Always read `tr.unsupported`. `stb`, `pss`, `xf`, `pz`, `sp` and `montecarlo`
+have no ngspice equivalent, so they are listed there rather than silently
+replaced with something that looks like an answer. `tune` reports the closest
+value it reached and says plainly when a target was not met.
 
 ## Spectre gotchas that cause silent wrong answers
 

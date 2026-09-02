@@ -21,6 +21,7 @@ Two things it is meant to fix:
 | `lib/analog_spice.py` | Operating points with per-device small-signal parameters and region checks, AC/Bode with gain-bandwidth extraction, noise with per-device contributions, DC sweeps, transient, bias solving, fT measurement, hand-vs-SPICE reconciliation |
 | `lib/spectre_netlist.py` | Spectre/ADE netlist parser and writer with byte-identical round-trip; edits change only the affected line |
 | `lib/netlist_digest.py` | Progressive-disclosure views of a large netlist: outline, summary, device rollup, net reports, dangling-node detection, digest diffing |
+| `lib/spectre_to_ngspice.py` | Translates a Spectre netlist to an ngspice deck, simulates it, tunes knobs to hit targets, and writes the result back for re-export |
 
 Plus 19 realistic ADE netlists with ground-truth JSON in `corpus/`, three
 verified worked examples in `examples/`, and reference material in
@@ -98,6 +99,7 @@ python scripts/analog_selftest.py     # 13 groups vs closed-form answers
 python scripts/test_parser.py         # 151 parser tests
 python scripts/test_digest.py         # 33 digest tests
 python scripts/test_integration.py    # parser + digest over the whole corpus
+python scripts/test_translate.py      # 138 translate/simulate/tune tests
 python scripts/bench_tokens.py        # compression benchmark
 ```
 
