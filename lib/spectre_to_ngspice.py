@@ -70,6 +70,9 @@ class TuneResult:
 
 _NODE_BAD = re.compile(r"[<>\[\]!@#]")
 _LINT_RE = re.compile(r"\d+[AaFf]\b")
+# Cards whose payload is a filesystem path, never a numeric value.
+_PATH_CARD_RE = re.compile(r"^\s*\.(include|inc|lib)\b", re.IGNORECASE)
+_QUOTED_RE = re.compile(r'"[^"]*"' + r"|'[^']*'")
 _NUM_TOKEN = re.compile(
     r"^([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)([A-Za-z]+)?$"
 )
@@ -210,13 +213,24 @@ def sanitize_node(name: str, node_map: dict[str, str]) -> str:
 
 
 def lint(deck: str) -> list[str]:
-    """Regression guard: tokens ngspice would read as atto (A) or femto (F)."""
+    """Regression guard: tokens ngspice would read as atto (A) or femto (F).
+
+    File paths and quoted strings are excluded. They are not numeric values, and
+    a path can easily contain a digit followed by 'a' or 'f' (a hex-looking temp
+    directory such as ".../2d3f-4983/..." is enough), which would otherwise be
+    reported as a unit error on a perfectly good deck.
+    """
     offenders: list[str] = []
     for line in str(deck).splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("*"):
             continue
-        for m in _LINT_RE.finditer(line):
+        # .include / .lib carry paths, never values.
+        if _PATH_CARD_RE.match(stripped):
+            continue
+        # Blank out quoted spans so a quoted path cannot trip the scan.
+        scannable = _QUOTED_RE.sub(lambda m: " " * len(m.group(0)), line)
+        for m in _LINT_RE.finditer(scannable):
             offenders.append("%s  (token %s)" % (stripped, m.group(0)))
     return offenders
 

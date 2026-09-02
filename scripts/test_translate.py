@@ -44,7 +44,10 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         print("PASS %s" % name)
     else:
         FAILURES += 1
-        extra = ("  " + detail) if detail else ""
+        # detail may arrive as a list (e.g. lint() output); coerce so that a
+        # failing check reports its reason instead of raising TypeError and
+        # hiding it.
+        extra = ("  %s" % (detail,)) if detail else ""
         print("FAIL %s%s" % (name, extra))
 
 
@@ -504,6 +507,24 @@ def test_lint_function() -> None:
     check("lint catches 10F", len(lint(bad_f)) >= 1, "off=%s" % lint(bad_f))
     good = "title\nI1 1 0 DC 0.0001\n.end\n"
     check("lint accepts 0.0001", lint(good) == [])
+
+    # Regression: a path can contain a digit followed by 'a'/'f' (a hex-looking
+    # temp directory is enough). Those are not values and must not be reported,
+    # or the guard cries wolf on a perfectly good deck. This was a real false
+    # positive, found only by running from a clean clone in a temp directory.
+    path_deck = (
+        'title\n'
+        '.include "C:/tmp/2d68c253-2d3f-4983/models/ptm_180nm.lib"\n'
+        '.lib /opt/pdk/9f8a/corners.lib tt\n'
+        'M1 d g 0 0 nch w=2u l=180n m=2\n'
+        '.end\n'
+    )
+    check("lint ignores hex-looking include paths", lint(path_deck) == [],
+          "off=%s" % (lint(path_deck),))
+    # ... while still catching a real trap on a line beside them.
+    mixed = path_deck.replace('.end', 'I1 1 0 DC 1A\n.end')
+    check("lint still catches a trap next to a path", len(lint(mixed)) == 1,
+          "off=%s" % (lint(mixed),))
 
 
 def test_simulate_op_only_resistor() -> None:
