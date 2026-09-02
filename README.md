@@ -22,6 +22,9 @@ Two things it is meant to fix:
 | `lib/spectre_netlist.py` | Spectre/ADE netlist parser and writer with byte-identical round-trip; edits change only the affected line |
 | `lib/netlist_digest.py` | Progressive-disclosure views of a large netlist: outline, summary, device rollup, net reports, dangling-node detection, digest diffing |
 | `lib/spectre_to_ngspice.py` | Translates a Spectre netlist to an ngspice deck, simulates it, tunes knobs to hit targets, and writes the result back for re-export |
+| `lib/netlist_export.py` | Describe a circuit once; emit CDL and Spectre with the PDK's CDF names for Cadence, and a SPICE deck that simulates locally |
+| `lib/pdk.py` | Scan a PDK you supply: model files, corners, device names, model families; probe a device to confirm it biases |
+| `lib/plots.py` | Design charts from a real PDK: I-V families, transfer curves, the gm/ID chart, Bode with phase margin, target sweeps |
 
 Plus 19 realistic ADE netlists with ground-truth JSON in `corpus/`, three
 verified worked examples in `examples/`, and reference material in
@@ -99,7 +102,9 @@ python scripts/analog_selftest.py     # 13 groups vs closed-form answers
 python scripts/test_parser.py         # 151 parser tests
 python scripts/test_digest.py         # 33 digest tests
 python scripts/test_integration.py    # parser + digest over the whole corpus
-python scripts/test_translate.py      # 138 translate/simulate/tune tests
+python scripts/test_translate.py      # translate / simulate / tune tests
+python scripts/test_export.py         # netlist generation and export
+python scripts/test_pdk_plots.py      # PDK scanning and design charts
 python scripts/bench_tokens.py        # compression benchmark
 ```
 
@@ -126,6 +131,19 @@ Found by measurement while building this, and encoded in the tools:
 - **A single-frequency `.noise` run silently omits the per-device breakdown.**
   Sweep at least a decade.
 - **In Spectre `M` is mega; in SPICE it is milli.** A silent 1e9 error.
+- **A PDK's `w` is a finger width in one process and a total width in another.**
+  Sizing is therefore always expressed as `w_f` (per finger) and `n_f` (count),
+  and a total-width parameter is computed, never assumed.
+- **Reading a target off a swept curve is not accurate enough.** Linear
+  interpolation between sweep points missed a 0.9 V target by 110 mV on a steep
+  width sweep, so crossings are refined by bisection.
+
+## PDKs
+
+No PDK is bundled. Cadence GPDK kits are proprietary and licensed, not open
+source, so `pdk.scan()` reads a directory you already have. Genuinely open PDKs
+work the same way and are listed in `pdk.OPEN_PDKS`: FreePDK45 (Apache 2.0, the
+closest open analogue to gpdk045), SkyWater sky130, GF180MCU, IHP SG13G2.
 
 ## Scope and limits
 

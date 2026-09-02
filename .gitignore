@@ -12,3 +12,6 @@ venv/
 
 # ngspice writes this next to the working dir when it checks a BSIM3 card
 b3v3_1check.log
+
+# Visible-agent run logs
+.claude-codex/
