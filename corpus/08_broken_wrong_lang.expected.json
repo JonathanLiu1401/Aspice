@@ -1,0 +1,16 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 1,
+  "subckt_names": ["cs_amp"],
+  "n_instances_top": 3,
+  "instances": [
+    {"name": "I0", "master": "cs_amp", "nodes": ["net1", "net3", "vdd", "0"], "params": {}},
+    {"name": "M0", "master": "nch", "nodes": ["vout", "vin", "vss", "vss"], "params": {"w": "W0", "l": "Lmin"}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"}
+  ],
+  "parameters": {"W0": "2u", "Lmin": "180n"},
+  "includes": [],
+  "expected_error": "wrong_lang"
+}

@@ -1,0 +1,7 @@
+# aspice runtime dependencies.
+# ngspice itself is separate: PySpice ships a Windows DLL, and on Linux/macOS
+# install libngspice via the system package manager.
+PySpice==1.4.3
+numpy
+scipy
+matplotlib

@@ -1,0 +1,34 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_mixed_lang
+// Design view name: schematic
+simulator lang=spectre
+global 0
+parameters W0=1u Lmin=180n
+
+// Foundry SPICE model cards. Spectre include files start in spice mode
+// unless the file suffix is .scs; ADE also emits an explicit switch.
+simulator lang=spice
+* nch / pch compact models (SPICE dot-cards)
+.model nch nmos level=54 version=4.5 toxe=1.85e-9 u0=0.045
++ vth0=0.32 vsat=1.0e5 k1=0.45
+.model pch pmos level=54 version=4.5 toxe=1.85e-9 u0=0.012
++ vth0=-0.30 vsat=8.0e4 k1=0.40
+.param tox_n=1.85e-9
+simulator lang=spectre
+
+// Library name: gpdk045_work
+// Cell name: tb_mixed_lang
+// View name: schematic
+M0 (vout vin 0 0) nch w=W0 l=Lmin
+RD (vdd vout) resistor r=10k
+VIN (vin 0) vsource dc=0.7 mag=1 type=dc
+VDD (vdd 0) vsource dc=1.8 type=dc
+
+simulatorOptions options reltol=1e-3 vabstol=1e-6 iabstol=1e-12 temp=27 \
+    tnom=27 gmin=1e-12
+dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
+ac1 ac start=1 stop=1G dec=10 annotate=status
+save vout
+saveOptions options save=allpub

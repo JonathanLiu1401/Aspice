@@ -1,0 +1,30 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 0,
+  "subckt_names": [],
+  "n_instances_top": 6,
+  "instances": [
+    {"name": "M0", "master": "nch", "nodes": ["vout", "vin", "0", "0"], "params": {"w": "W0", "l": "Lmin"}},
+    {"name": "RD", "master": "resistor", "nodes": ["vdd", "vout"], "params": {"r": "10k"}},
+    {"name": "Iprobe", "master": "iprobe", "nodes": ["vdd", "mid"], "params": {}},
+    {"name": "RD2", "master": "resistor", "nodes": ["mid", "vout"], "params": {"r": "1m"}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"},
+    {"name": "dc1", "type": "dc"},
+    {"name": "ac1", "type": "ac"},
+    {"name": "tran1", "type": "tran"},
+    {"name": "noise1", "type": "noise"},
+    {"name": "stb1", "type": "stb"},
+    {"name": "pz1", "type": "pz"},
+    {"name": "xf1", "type": "xf"},
+    {"name": "swp1", "type": "sweep"},
+    {"name": "dc2", "type": "dc"},
+    {"name": "alt1", "type": "alter"}
+  ],
+  "parameters": {"W0": "2u", "Lmin": "180n", "vgs": "0.7"},
+  "includes": [
+    {"path": "$PDK/models/spectre/gpdk045.scs", "section": "tt"}
+  ],
+  "expected_error": null
+}

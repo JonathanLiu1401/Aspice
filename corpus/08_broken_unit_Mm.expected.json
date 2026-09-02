@@ -1,0 +1,16 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 0,
+  "subckt_names": [],
+  "n_instances_top": 4,
+  "instances": [
+    {"name": "M0", "master": "nch", "nodes": ["vout", "vin", "0", "0"], "params": {"w": "2u", "l": "180n"}},
+    {"name": "RD", "master": "resistor", "nodes": ["vdd", "vout"], "params": {"r": "1M"}}
+  ],
+  "analyses": [
+    {"name": "dc", "type": "dc"}
+  ],
+  "parameters": {},
+  "includes": [],
+  "expected_error": "unit_Mm"
+}

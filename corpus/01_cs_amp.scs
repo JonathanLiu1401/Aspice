@@ -1,0 +1,32 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_cs_amp
+// Design view name: schematic
+simulator lang=spectre
+global 0
+parameters W0=2u Lmin=180n VDD=1.8
+include "$PDK/models/spectre/gpdk045.scs" section=tt
+
+// Library name: gpdk045_work
+// Cell name: cs_amp
+// View name: schematic
+subckt cs_amp vin vout vdd vss
+    M0 (vout vin vss vss) nch w=2u l=180n
+    RD (vdd vout) resistor r=10k
+ends cs_amp
+
+// Library name: gpdk045_work
+// Cell name: tb_cs_amp
+// View name: schematic
+I0 (net1 net3 vdd 0) cs_amp
+VIN (net1 0) vsource dc=0.7 mag=1 type=dc
+VDD (vdd 0) vsource dc=1.8 type=dc
+
+simulatorOptions options reltol=1e-3 vabstol=1e-6 iabstol=1e-12 temp=27 \
+    tnom=27 scalem=1.0 scale=1.0 gmin=1e-12 rforce=1 maxnotes=5 maxwarns=5 \
+    digits=5 cols=80 pivrel=1e-3
+dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
+ac1 ac start=1 stop=1G dec=10 annotate=status
+save I0:net3
+saveOptions options save=allpub

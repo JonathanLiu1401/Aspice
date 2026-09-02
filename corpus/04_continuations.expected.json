@@ -1,0 +1,21 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 0,
+  "subckt_names": [],
+  "n_instances_top": 6,
+  "instances": [
+    {"name": "M0", "master": "nch", "nodes": ["vout", "vin", "0", "0"], "params": {"w": "W0", "l": "Lmin", "ad": "1.0e-12", "as": "1.0e-12", "pd": "5u", "ps": "5u", "nrd": "0", "nrs": "0", "m": "1"}},
+    {"name": "M1", "master": "nch", "nodes": ["vout", "vin", "0", "0"], "params": {"w": "2u", "l": "360n", "ad": "5.0e-13", "as": "5.0e-13", "pd": "3u", "ps": "3u", "nrd": "0", "nrs": "0", "m": "1"}},
+    {"name": "RD", "master": "resistor", "nodes": ["vdd", "vout"], "params": {"r": "10k", "tc1": "0.0", "tc2": "0.0"}},
+    {"name": "Rleak", "master": "resistor", "nodes": ["vdd", "0"], "params": {"r": "1g", "tc1": "0", "tc2": "0"}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"},
+    {"name": "ac1", "type": "ac"}
+  ],
+  "parameters": {"W0": "4u", "Lmin": "180n"},
+  "includes": [
+    {"path": "$PDK/models/spectre/gpdk045.scs", "section": "tt"}
+  ],
+  "expected_error": null
+}

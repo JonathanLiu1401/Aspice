@@ -1,0 +1,43 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_continuations
+// Design view name: schematic
+simulator lang=spectre
+global 0
+parameters W0=4u Lmin=180n
+include "$PDK/models/spectre/gpdk045.scs" section=tt
+
+// Trailing backslash continuation (Spectre native, common in ADE options)
+simulatorOptions options reltol=1e-3 vabstol=1e-6 iabstol=1e-12 temp=27 \
+    tnom=27 scalem=1.0 scale=1.0 gmin=1e-12 rforce=1 maxnotes=5 \
+    maxwarns=5 digits=5 cols=80 pivrel=1e-3
+
+// Mixed \ and leading-+ continuation on one MOSFET instance
+M0 (vout vin 0 0) nch w=W0 \
+    l=Lmin ad=1.0e-12 as=1.0e-12 \
+    pd=5u ps=5u nrd=0 nrs=0 \
++ m=1
+
+// Leading-+ only (SPICE-style continuation; ADE dumps this too)
+M1 (vout vin 0 0) nch w=2u l=360n
++ ad=5.0e-13 as=5.0e-13 pd=3u ps=3u
++ nrd=0 nrs=0 m=1
+
+RD (vdd vout) resistor r=10k \
+    tc1=0.0
++ tc2=0.0
+
+VIN (vin 0) vsource dc=0.7 mag=1 type=dc
+VDD (vdd 0) vsource dc=1.8 type=dc
+
+// SPICE mode: + continuation is the documented SPICE rule
+simulator lang=spice
+Rleak vdd 0 1g
++ tc1=0 tc2=0
+simulator lang=spectre
+
+dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
+ac1 ac start=1 stop=1G dec=10 annotate=status
+save vout
+saveOptions options save=allpub

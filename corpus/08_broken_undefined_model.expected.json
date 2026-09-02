@@ -1,0 +1,15 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 0,
+  "subckt_names": [],
+  "n_instances_top": 4,
+  "instances": [
+    {"name": "M0", "master": "nch_missing", "nodes": ["vout", "vin", "0", "0"], "params": {"w": "W0", "l": "Lmin"}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"}
+  ],
+  "parameters": {"W0": "2u", "Lmin": "180n"},
+  "includes": [],
+  "expected_error": "undefined_model"
+}

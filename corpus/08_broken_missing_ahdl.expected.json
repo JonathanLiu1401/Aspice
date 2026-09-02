@@ -1,0 +1,18 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 0,
+  "subckt_names": [],
+  "n_instances_top": 2,
+  "instances": [
+    {"name": "RVA", "master": "missing_resistor", "nodes": ["vdd", "0"], "params": {"r": "Rva"}},
+    {"name": "VDD", "master": "vsource", "nodes": ["vdd", "0"], "params": {"dc": "1.8", "type": "dc"}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"}
+  ],
+  "parameters": {"Rva": "10k"},
+  "includes": [
+    {"path": "$PDK/veriloga/missing_resistor.va", "section": null}
+  ],
+  "expected_error": "missing_ahdl"
+}

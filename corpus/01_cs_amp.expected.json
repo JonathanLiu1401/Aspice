@@ -1,0 +1,21 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 1,
+  "subckt_names": ["cs_amp"],
+  "n_instances_top": 3,
+  "instances": [
+    {"name": "I0", "master": "cs_amp", "nodes": ["net1", "net3", "vdd", "0"], "params": {}},
+    {"name": "M0", "master": "nch", "nodes": ["vout", "vin", "vss", "vss"], "params": {"w": "2u", "l": "180n"}},
+    {"name": "VIN", "master": "vsource", "nodes": ["net1", "0"], "params": {"dc": "0.7", "mag": "1", "type": "dc"}},
+    {"name": "VDD", "master": "vsource", "nodes": ["vdd", "0"], "params": {"dc": "1.8", "type": "dc"}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"},
+    {"name": "ac1", "type": "ac"}
+  ],
+  "parameters": {"W0": "2u", "Lmin": "180n", "VDD": "1.8"},
+  "includes": [
+    {"path": "$PDK/models/spectre/gpdk045.scs", "section": "tt"}
+  ],
+  "expected_error": null
+}

@@ -1,0 +1,14 @@
+# Transistor model cards are downloaded by scripts/fetch_models.py, not vendored.
+# See README: the upstream mirror carries no licence.
+models/*.lib
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Visible-agent run logs
+.claude-codex/
+
+# ngspice writes this next to the working dir when it checks a BSIM3 card
+b3v3_1check.log

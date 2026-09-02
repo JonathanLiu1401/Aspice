@@ -1,0 +1,20 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 0,
+  "subckt_names": [],
+  "n_instances_top": 5,
+  "instances": [
+    {"name": "M0", "master": "nch", "nodes": ["vout", "vin", "0", "0"], "params": {"w": "W0*2", "l": "{Lmin}", "m": "nf"}},
+    {"name": "M1", "master": "nch", "nodes": ["vout", "vin", "0", "0"], "params": {"w": "pPar(\"W\")", "l": "VAR(\"Lmin\")", "nf": "iPar(\"nf\")"}},
+    {"name": "RD", "master": "resistor", "nodes": ["vdd", "vout"], "params": {"r": "10k"}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"},
+    {"name": "ac1", "type": "ac"}
+  ],
+  "parameters": {"W0": "1u", "Lmin": "180n", "nf": "2"},
+  "includes": [
+    {"path": "$PDK/models/spectre/gpdk045.scs", "section": "tt"}
+  ],
+  "expected_error": null
+}

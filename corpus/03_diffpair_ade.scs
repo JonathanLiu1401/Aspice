@@ -1,0 +1,44 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_diffpair
+// Design view name: schematic
+simulator lang=spectre
+global 0
+parameters Wdiff=2u Lmin=180n Rload=10k IBIAS=20u VDD=1.8 VINCM=0.9
+include "$PDK/models/spectre/gpdk045.scs" section=tt
+
+// Library name: gpdk045_work
+// Cell name: diffpair
+// View name: schematic
+subckt diffpair inn inp outp outn vbias vdd vss
+    // Nested cell: tail current source
+    subckt tail_cs d g vss
+        MT (d g vss vss) nch w=4u l=360n
+    ends tail_cs
+    ITAIL (net_tail vbias vss) tail_cs
+    MN1 (outn inn net_tail vss) nch w=Wdiff l=Lmin
+    MN2 (outp inp net_tail vss) nch w=Wdiff l=Lmin
+    RP (vdd outp) resistor r=Rload
+    RN (vdd outn) resistor r=Rload
+ends diffpair
+
+// Library name: gpdk045_work
+// Cell name: tb_diffpair
+// View name: schematic
+I0 (inn inp outp outn vbias vdd 0) diffpair
+VINP (inp 0) vsource dc=0.9 mag=0.5 type=dc
+VINN (inn 0) vsource dc=0.9 mag=-0.5 type=dc
+VDD (vdd 0) vsource dc=1.8 type=dc
+VBIAS (vbias 0) vsource dc=0.55 type=dc
+
+simulatorOptions options reltol=1e-3 vabstol=1e-6 iabstol=1e-12 temp=27 \
+    tnom=27 scalem=1.0 scale=1.0 gmin=1e-12 rforce=1
+dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
+ac1 ac start=1 stop=10G dec=10 annotate=status
+tran1 tran stop=100n
+save outp
+save outn
+save I0.outp
+save I0.outn
+saveOptions options save=selected currents=selected

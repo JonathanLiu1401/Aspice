@@ -1,0 +1,20 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_wrong_lang
+// Design view name: schematic
+simulator lang=spectre
+global 0
+parameters W0=2u Lmin=180n
+
+// Fault: language left in spice mode, then Spectre-native statements follow.
+simulator lang=spice
+subckt cs_amp vin vout vdd vss
+    M0 (vout vin vss vss) nch w=W0 l=Lmin
+    RD (vdd vout) resistor r=10k
+ends cs_amp
+I0 (net1 net3 vdd 0) cs_amp
+VIN (net1 0) vsource dc=0.7 mag=1 type=dc
+VDD (vdd 0) vsource dc=1.8 type=dc
+dcOp dc write="spectre.dc" annotate=status
+saveOptions options save=allpub

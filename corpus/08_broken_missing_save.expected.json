@@ -1,0 +1,18 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 0,
+  "subckt_names": [],
+  "n_instances_top": 4,
+  "instances": [
+    {"name": "M0", "master": "nch", "nodes": ["vout", "vin", "0", "0"], "params": {"w": "W0", "l": "Lmin"}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"},
+    {"name": "ac1", "type": "ac"}
+  ],
+  "parameters": {"W0": "2u", "Lmin": "180n"},
+  "includes": [
+    {"path": "$PDK/models/spectre/gpdk045.scs", "section": "tt"}
+  ],
+  "expected_error": "missing_save"
+}

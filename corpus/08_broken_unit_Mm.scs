@@ -1,0 +1,19 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_unit_Mm
+// Design view name: schematic
+simulator lang=spectre
+global 0
+
+// Fault: language switched to spice, then Rload=1M. In spice, M means milli
+// so this is 1e-3 ohm. In spectre, 1M would have been 1e6 ohm. Silent 1e9 error.
+// Model is defined on purpose so this file has that one fault only.
+simulator lang=spice
+.model nch nmos level=1 vto=0.5 kp=2.0e-4
+M0 vout vin 0 0 nch w=2u l=180n
+RD vdd vout 1M
+VIN vin 0 DC 0.7
+VDD vdd 0 DC 1.8
+.dc VIN 0 1.8 0.01
+.end

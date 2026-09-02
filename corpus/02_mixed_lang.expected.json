@@ -1,0 +1,19 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 0,
+  "subckt_names": [],
+  "n_instances_top": 4,
+  "instances": [
+    {"name": "M0", "master": "nch", "nodes": ["vout", "vin", "0", "0"], "params": {"w": "W0", "l": "Lmin"}},
+    {"name": "RD", "master": "resistor", "nodes": ["vdd", "vout"], "params": {"r": "10k"}},
+    {"name": "VIN", "master": "vsource", "nodes": ["vin", "0"], "params": {"dc": "0.7", "mag": "1", "type": "dc"}},
+    {"name": "VDD", "master": "vsource", "nodes": ["vdd", "0"], "params": {"dc": "1.8", "type": "dc"}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"},
+    {"name": "ac1", "type": "ac"}
+  ],
+  "parameters": {"W0": "1u", "Lmin": "180n", "tox_n": "1.85e-9"},
+  "includes": [],
+  "expected_error": null
+}

@@ -1,0 +1,56 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_model_blocks
+// Design view name: schematic
+simulator lang=spectre
+global 0
+parameters Wn=1u Wp=2u Lmin=180n
+
+// Multi-line brace model (Spectre native). Parameter names are a short
+// real BSIM4 subset, not a complete card.
+model nch bsim4 {
+    type=n
+    version=4.5
+    tnom=27
+    toxe=1.85n
+    toxp=1.2n
+    xj=100n
+    nch=1.7e17
+    vth0=0.32
+    k1=0.45
+    k2=0.0
+    u0=0.045
+    ua=1.0e-9
+    ub=1.0e-19
+    vsat=1.0e5
+    a0=1.0
+    ags=0.0
+    keta=-0.03
+    pclm=0.10
+    pdiblc1=0.10
+    drout=0.05
+    eta0=0.08
+    nfactor=1.0
+    cdsc=2.4e-4
+    cit=0.0
+    voff=-0.08
+}
+
+// Single-line inline model
+model pch bsim4 type=p version=4.5 tnom=27 toxe=1.85n vth0=-0.30 u0=0.012 vsat=8.0e4
+
+// Library name: gpdk045_work
+// Cell name: tb_model_blocks
+// View name: schematic
+MN (vout vin 0 0) nch w=Wn l=Lmin
+MP (vout vin vdd vdd) pch w=Wp l=Lmin
+VIN (vin 0) vsource dc=0.9 mag=1 type=dc
+VDD (vdd 0) vsource dc=1.8 type=dc
+
+simulatorOptions options reltol=1e-3 vabstol=1e-6 iabstol=1e-12 temp=27 \
+    tnom=27 gmin=1e-12
+dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
+ac1 ac start=1 stop=1G dec=10 annotate=status
+save vout
+saveOptions options save=allpub

@@ -1,0 +1,26 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_expressions
+// Design view name: schematic
+simulator lang=spectre
+global 0
+parameters W0=1u Lmin=180n nf=2
+include "$PDK/models/spectre/gpdk045.scs" section=tt
+
+// Library name: gpdk045_work
+// Cell name: tb_expressions
+// View name: schematic
+// Raw expressions kept as text: arithmetic, braces, and CDF pPar/VAR/iPar forms
+M0 (vout vin 0 0) nch w=W0*2 l={Lmin} m=nf
+M1 (vout vin 0 0) nch w=pPar("W") l=VAR("Lmin") nf=iPar("nf")
+RD (vdd vout) resistor r=10k
+VIN (vin 0) vsource dc=0.7 mag=1 type=dc
+VDD (vdd 0) vsource dc=1.8 type=dc
+
+simulatorOptions options reltol=1e-3 vabstol=1e-6 iabstol=1e-12 temp=27 \
+    tnom=27 gmin=1e-12
+dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
+ac1 ac start=1 stop=1G dec=10 annotate=status
+save vout
+saveOptions options save=allpub

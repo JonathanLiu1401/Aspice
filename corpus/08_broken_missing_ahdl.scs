@@ -1,0 +1,16 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_missing_ahdl
+// Design view name: schematic
+simulator lang=spectre
+global 0
+parameters Rva=10k
+ahdl_include "$PDK/veriloga/missing_resistor.va"
+
+// Fault: Verilog-A file named above is absent
+RVA (vdd 0) missing_resistor r=Rva
+VDD (vdd 0) vsource dc=1.8 type=dc
+
+dcOp dc write="spectre.dc" annotate=status
+saveOptions options save=allpub

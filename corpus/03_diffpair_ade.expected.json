@@ -1,0 +1,30 @@
+{
+  "language_at_start": "spectre",
+  "n_subckts": 2,
+  "subckt_names": ["diffpair", "tail_cs"],
+  "n_instances_top": 5,
+  "instances": [
+    {"name": "I0", "master": "diffpair", "nodes": ["inn", "inp", "outp", "outn", "vbias", "vdd", "0"], "params": {}},
+    {"name": "VINP", "master": "vsource", "nodes": ["inp", "0"], "params": {"dc": "0.9", "mag": "0.5", "type": "dc"}},
+    {"name": "VINN", "master": "vsource", "nodes": ["inn", "0"], "params": {"dc": "0.9", "mag": "-0.5", "type": "dc"}},
+    {"name": "MN1", "master": "nch", "nodes": ["outn", "inn", "net_tail", "vss"], "params": {"w": "Wdiff", "l": "Lmin"}},
+    {"name": "ITAIL", "master": "tail_cs", "nodes": ["net_tail", "vbias", "vss"], "params": {}}
+  ],
+  "analyses": [
+    {"name": "dcOp", "type": "dc"},
+    {"name": "ac1", "type": "ac"},
+    {"name": "tran1", "type": "tran"}
+  ],
+  "parameters": {
+    "Wdiff": "2u",
+    "Lmin": "180n",
+    "Rload": "10k",
+    "IBIAS": "20u",
+    "VDD": "1.8",
+    "VINCM": "0.9"
+  },
+  "includes": [
+    {"path": "$PDK/models/spectre/gpdk045.scs", "section": "tt"}
+  ],
+  "expected_error": null
+}

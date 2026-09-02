@@ -1,0 +1,38 @@
+// Generated for: spectre
+// Design Netlist Generated on: Sep 1 22:31:00 2026
+// Design library name: gpdk045_work
+// Design cell name: tb_analyses
+// Design view name: schematic
+simulator lang=spectre
+global 0
+parameters W0=2u Lmin=180n vgs=0.7
+include "$PDK/models/spectre/gpdk045.scs" section=tt
+
+// Library name: gpdk045_work
+// Cell name: tb_analyses
+// View name: schematic
+M0 (vout vin 0 0) nch w=W0 l=Lmin
+RD (vdd vout) resistor r=10k
+VIN (vin 0) vsource dc=0.7 mag=1 type=dc
+VDD (vdd 0) vsource dc=1.8 type=dc
+Iprobe (vdd mid) iprobe
+RD2 (mid vout) resistor r=1m
+
+simulatorOptions options reltol=1e-3 vabstol=1e-6 iabstol=1e-12 temp=27 \
+    tnom=27 gmin=1e-12
+
+dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
+dc1 dc dev=VIN param=dc start=0 stop=1.8 step=0.01
+ac1 ac start=1 stop=1G dec=10 annotate=status
+tran1 tran stop=100n
+noise1 noise start=1 stop=1G dec=10 oprobe=RD iprobe=VIN
+stb1 stb start=1 stop=10G dec=10 probe=Iprobe
+pz1 pz iprobe=VIN oprobe=RD
+xf1 xf start=1 stop=10G dec=10 probe=RD
+swp1 sweep param=temp values=[-40 27 125] {
+    dc2 dc dev=VIN param=dc start=0 stop=1.8 step=0.1
+}
+alt1 alter param=temp value=85
+
+save vout
+saveOptions options save=allpub
