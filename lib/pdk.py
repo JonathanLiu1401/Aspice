@@ -44,6 +44,16 @@ _MODEL_RE = re.compile(r'^\s*\.?model\s+([^\s(]+)\s+([A-Za-z][\w.]*)', re.I | re
 _LIB_SECTION_RE = re.compile(r'^\s*\.lib\s+(\S+)\s*$', re.I | re.M)
 # Spectre `section <name>` / `endsection`.
 _SECTION_RE = re.compile(r'^\s*section\s+(\S+)', re.I | re.M)
+# Every section open/close in either dialect, in source order, so a model can
+# be attributed to the block it actually sits in. Without the closers, a card
+# after `.endl` would inherit the section that had already ended.
+_SECTION_EVENT_RE = re.compile(
+    r'^\s*(?:(\.lib)\s+(\S+)\s*$|(section)\s+(\S+)|(\.endl|endsection)\b)',
+    re.I | re.M)
+# Spectre states the device polarity as `type=n` / `type=p`; the model's own
+# mtype there is the family (bsim4), not the device kind. SPICE puts the kind
+# in mtype instead, so both paths are needed.
+_TYPE_RE = re.compile(r'\btype\s*=\s*([A-Za-z]+)', re.I)
 # `.include "x"` / `include "x"` / `.lib "file" section`.
 _INCLUDE_RE = re.compile(
     r'^\s*\.?(?:include|inc|lib)\s+"?([^"\s]+)"?(?:\s+(\S+))?', re.I | re.M)
@@ -59,6 +69,24 @@ _BSIM_LEVEL = {1: 'MOS level 1 (square law)', 2: 'MOS level 2',
                54: 'BSIM4', 68: 'BSIM-CMG (FinFET)', 72: 'BSIM-BULK'}
 
 
+def _section_at(text, pos):
+    """Which corner block position `pos` falls inside, or None.
+
+    Tracks opens and closes in both dialects rather than taking the last open,
+    so a card sitting outside any block is reported as None instead of
+    inheriting a section that has already ended.
+    """
+    section = None
+    for ev in _SECTION_EVENT_RE.finditer(text, 0, pos):
+        if ev.group(1):          # .lib <name>
+            section = ev.group(2).lower()
+        elif ev.group(3):        # section <name>
+            section = ev.group(4).lower()
+        else:                    # .endl / endsection
+            section = None
+    return section
+
+
 @dataclass
 class PdkModel:
     """One model card found in the PDK."""
@@ -68,10 +96,25 @@ class PdkModel:
     line_no: int
     section: str | None = None
     level: int | None = None
+    dtype: str | None = None     # Spectre `type=n` / `type=p`, if stated
 
     @property
     def kind(self):
-        return _KIND.get(self.mtype.lower(), self.mtype.lower())
+        # A Spectre card's mtype is the family (bsim4), so polarity has to come
+        # from type=n/p. Fall back to mtype for SPICE, which puts it there.
+        if self.dtype:
+            polarity = {'n': 'nmos', 'p': 'pmos',
+                        'nmos': 'nmos', 'pmos': 'pmos'}.get(self.dtype)
+            if polarity:
+                return polarity
+        mtype = self.mtype.lower()
+        if mtype in _KIND:
+            return _KIND[mtype]
+        # Do not let a model family leak into the device-kind namespace: an
+        # unclassifiable card is 'unknown', not 'bsim4'.
+        if mtype.startswith('bsim') or mtype in ('mos', 'hisim', 'psp'):
+            return 'unknown'
+        return mtype
 
     @property
     def model_family(self):
@@ -241,12 +284,12 @@ def scan(root, max_files=4000, follow_includes=True):
             line_no = text.count('\n', 0, m.start()) + 1
             tail = text[m.end():m.end() + 4000]
             level = _LEVEL_RE.search(tail)
-            section = None
-            for sec_match in _LIB_SECTION_RE.finditer(text, 0, m.start()):
-                section = sec_match.group(1).lower()
+            dtype = _TYPE_RE.search(tail)
             entry.models.append(PdkModel(
                 name=name, mtype=mtype, file=str(path), line_no=line_no,
-                section=section, level=int(level.group(1)) if level else None))
+                section=_section_at(text, m.start()),
+                dtype=dtype.group(1).lower() if dtype else None,
+                level=int(level.group(1)) if level else None))
 
         if follow_includes:
             for m in _INCLUDE_RE.finditer(text):

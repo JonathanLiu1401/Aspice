@@ -62,6 +62,83 @@ check('techmap skeleton names real cells',
       skeleton['cells'])
 check('techmap skeleton flags the CDF guess', '_check_me' in skeleton)
 
+print('\n1b. Corner sections and nesting (the PTM cards have none)')
+# The flat PTM cards carry no corner blocks at all, so scanning models/ leaves
+# every section code path untested - including the `section=tt` resolution the
+# export workflow depends on. A real kit is also nested, with .scs and .mod
+# files rather than one flat pile of .lib. Both syntaxes below are standard
+# (SPICE .lib/.endl, Spectre section/endsection), so this is a fair test of the
+# parser even though no licensed kit is present to scan.
+check('models/ has no corner sections, so scanning it proves nothing about them',
+      p.corners() == [], p.corners())
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    (root / 'models' / 'spectre').mkdir(parents=True)
+    (root / 'models' / 'hspice').mkdir(parents=True)
+    # A real Spectre card states polarity as type=n, and its own mtype is the
+    # family (bsim4). nofet_x deliberately omits type and sits outside every
+    # section, which is how the two edge behaviours below get checked.
+    (root / 'models' / 'spectre' / 'design.scs').write_text(
+        'section tt\n'
+        '  model nfet_tt bsim4 { type=n level=54 vth0=0.42 }\n'
+        'endsection tt\n'
+        'section ss\n'
+        '  model nfet_ss bsim4 { type=n level=54 vth0=0.50 }\n'
+        'endsection ss\n'
+        'section ff\n'
+        '  model pfet_ff bsim4 { type=p level=54 vth0=-0.34 }\n'
+        'endsection ff\n'
+        'model nofet_x bsim4 { level=54 }\n')
+    (root / 'models' / 'hspice' / 'corners.lib').write_text(
+        '.lib tt\n'
+        '.model pfet_tt pmos level=49 vth0=-0.45\n'
+        '.endl tt\n'
+        '.lib sf\n'
+        '.model pfet_sf pmos level=49 vth0=-0.39\n'
+        '.endl sf\n'
+        '.model rpoly r level=49\n')
+    kit = PDK.scan(root)
+    check('recurses into a nested kit layout',
+          len([f for f in kit.files if f.models]) == 2,
+          [Path(f.path).name for f in kit.files if f.models])
+    check('reads .scs and .lib alongside each other',
+          {Path(f.path).suffix for f in kit.files if f.models} == {'.scs', '.lib'},
+          sorted({Path(f.path).suffix for f in kit.files if f.models}))
+    corners = set(kit.corners())
+    check('finds Spectre section/endsection corners',
+          {'tt', 'ss', 'ff'} <= corners, sorted(corners))
+    check('finds SPICE .lib/.endl corners', {'sf'} <= corners, sorted(corners))
+    by_name = {m.name: m for m in kit.models}
+    check('a Spectre card is classified by type=n, not by its bsim4 mtype',
+          by_name['nfet_tt'].kind == 'nmos', by_name['nfet_tt'].kind)
+    check('type=p likewise', by_name['pfet_ff'].kind == 'pmos',
+          by_name['pfet_ff'].kind)
+    check('a SPICE card is still classified by its mtype',
+          by_name['pfet_tt'].kind == 'pmos', by_name['pfet_tt'].kind)
+    check('an unclassifiable card is unknown, not the model family',
+          by_name['nofet_x'].kind == 'unknown', by_name['nofet_x'].kind)
+    check('both polarities reachable via by_kind across dialects',
+          {m.name for m in kit.by_kind('nmos')} == {'nfet_tt', 'nfet_ss'}
+          and {m.name for m in kit.by_kind('pmos')} == {'pfet_ff', 'pfet_tt', 'pfet_sf'},
+          {'nmos': [m.name for m in kit.by_kind('nmos')],
+           'pmos': [m.name for m in kit.by_kind('pmos')]})
+    fams = {m.model_family for m in kit.models}
+    check('separates BSIM4 from BSIM3 by level',
+          'BSIM4' in fams and 'BSIM3v3' in fams, sorted(fams))
+    check('a Spectre card remembers its corner too, not just a SPICE one',
+          by_name['nfet_tt'].section == 'tt'
+          and by_name['nfet_ss'].section == 'ss'
+          and by_name['pfet_ff'].section == 'ff',
+          [(m.name, m.section) for m in kit.models])
+    check('SPICE corners still attributed', by_name['pfet_tt'].section == 'tt'
+          and by_name['pfet_sf'].section == 'sf')
+    # The closers are what make this correct: taking the last opener instead
+    # would tag both of these with the section that had already ended.
+    check('a card after endsection belongs to no corner',
+          by_name['nofet_x'].section is None, by_name['nofet_x'].section)
+    check('a card after .endl belongs to no corner',
+          by_name['rpoly'].section is None, by_name['rpoly'].section)
+
 print('\n2. Scanning something that is not a PDK fails honestly')
 with tempfile.TemporaryDirectory() as tmp:
     (Path(tmp) / 'notes.txt').write_text('nothing to see here\n')

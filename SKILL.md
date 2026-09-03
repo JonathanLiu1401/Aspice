@@ -300,6 +300,11 @@ checked against closed-form hand analysis, not golden files.
    binds CDF parameters is only answerable on the machine with Virtuoso.
 4. **`.lib` corner and section semantics.** Which `section=tt` resolves to,
    and how corners are organised, is a property of the kit you have.
+   `pdk.scan()` is tested against a nested synthetic kit covering both
+   dialects (SPICE `.lib`/`.endl` and Spectre `section`/`endsection`, with
+   `type=n`/`type=p` polarity), because the PTM cards in `models/` are flat
+   and carry no corner blocks at all. It has never been run against a real
+   licensed kit, so treat its first run on yours as the actual test.
 
 `export_package` records `verified_locally: False` in its manifest for exactly
 this reason. It is a claim about where the netlist has and has not been run.

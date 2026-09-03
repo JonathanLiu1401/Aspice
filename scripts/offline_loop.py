@@ -23,6 +23,17 @@ SRC = ROOT / 'corpus' / '03_diffpair_ade.scs'
 PTM = ROOT / 'models' / 'ptm_180nm.lib'
 FAIL = []
 
+if not SRC.is_file():
+    print(f'corpus netlist missing: {SRC}')
+    sys.exit(1)
+if not PTM.is_file():
+    # models/ is gitignored, so a fresh clone has no model cards. Without this
+    # guard the run dies later with an opaque "outputs missing from []".
+    print(f'model card missing: {PTM}')
+    print('Run  python scripts/fetch_models.py  first to download the PTM '
+          'cards, then re-run this script.')
+    sys.exit(1)
+
 
 def check(name, cond, detail=''):
     print(f'  [{"PASS" if cond else "FAIL"}] {name}{"  " + str(detail) if detail else ""}')
