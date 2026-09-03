@@ -256,12 +256,53 @@ in one process and a total width in another, and nothing warns you. So `w_f` is
 always the finger width here, `n_f` the count, SPICE gets `w=w_f` and `m=n_f`,
 and a PDK total-width parameter is computed rather than assumed.
 
-## Cadence is not installed here
+## Verifying this without Cadence
 
-There is no Spectre binary on this machine, so netlists are simulated with
-ngspice. The parser, digest and editing paths are exact; simulation is a
-translation and should be described that way. Nothing in this skill has been
-verified against a real Spectre run.
+Everything here runs with no Cadence, no Spectre and no licensed PDK. To prove
+the toolchain end to end in one command:
+
+    python scripts/offline_loop.py
+
+That walks the full production round trip on `corpus/03_diffpair_ade.scs`, a
+netlist written the way Virtuoso writes them (CDF names, `$PDK ... section=tt`
+include, `simulator lang=spectre`): ingest and byte-identical round trip,
+digest instead of raw text, substitute an open model card for the licensed PDK,
+bias it in ngspice, tune two knobs to hit an output-common-mode spec, re-export
+a configured ADE netlist that still points at the real PDK, then re-simulate
+*from the exported file* to confirm it reproduces the target.
+
+The eight suites in `scripts/` are the per-component version of the same thing:
+
+    analog_selftest test_parser test_digest test_integration
+    test_translate  test_export test_pdk_plots offline_loop
+
+Run them from a clean clone. A lint false positive once appeared only when the
+repo path contained a hex-looking temp directory.
+
+**What offline testing genuinely covers.** Parsing, digesting and editing are
+exact and round-trip byte-identically, including the writer/parser fixed point
+(`emit -> parse -> emit` is stable). Circuits really are biased and swept, by
+ngspice, which is an independent implementation and not this code. Numbers are
+checked against closed-form hand analysis, not golden files.
+
+**What it cannot cover, and what the Linux box is for.** Four things:
+
+1. **Spectre's numbers.** ngspice is a different simulator with different model
+   implementations and convergence. Simulating a Spectre netlist here is a
+   translation, and the translation reports what it dropped. Nothing in this
+   skill has been checked against a real Spectre run.
+2. **The real PDK.** Substituting an open card for a licensed one moves the
+   operating point, sometimes a lot. `offline_loop.py` demonstrates this rather
+   than hiding it: the corpus diff pair was drawn for gpdk045 and, biased
+   against a 180 nm PTM card, its tail starves and both outputs sit near VDD
+   until the bias is retuned. Never carry a bias point across a model swap.
+3. **`spiceIn` import.** Whether Virtuoso actually builds the cellviews and
+   binds CDF parameters is only answerable on the machine with Virtuoso.
+4. **`.lib` corner and section semantics.** Which `section=tt` resolves to,
+   and how corners are organised, is a property of the kit you have.
+
+`export_package` records `verified_locally: False` in its manifest for exactly
+this reason. It is a claim about where the netlist has and has not been run.
 
 ## References
 

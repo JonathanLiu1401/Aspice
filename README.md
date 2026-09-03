@@ -145,12 +145,28 @@ source, so `pdk.scan()` reads a directory you already have. Genuinely open PDKs
 work the same way and are listed in `pdk.OPEN_PDKS`: FreePDK45 (Apache 2.0, the
 closest open analogue to gpdk045), SkyWater sky130, GF180MCU, IHP SG13G2.
 
+## Verifying it without Cadence
+
+    python scripts/offline_loop.py
+
+Walks the full round trip on a Virtuoso-style netlist with a `$PDK` include:
+ingest, byte-identical round trip, digest, substitute an open model card for
+the licensed PDK, bias in ngspice, tune two knobs to an output-common-mode
+spec, re-export a configured ADE netlist that still points at the real PDK,
+and re-simulate from the exported file to confirm it holds. No Cadence, no
+Spectre, no proprietary PDK.
+
 ## Scope and limits
 
 - **Cadence is not required and was not available.** Netlists are simulated
   with ngspice, so simulation of a Spectre netlist is a translation. Parsing,
   digesting and editing are exact and round-trip byte-identically; nothing here
   has been checked against a real Spectre run.
+- Four things can only be checked on a machine with Virtuoso: Spectre's own
+  numbers, the licensed PDK's models, whether `spiceIn` really imports the
+  netlist, and how `section=tt` and the corner structure resolve in your kit.
+  A model swap in particular moves the operating point, so never carry a bias
+  point across one. See `scripts/offline_loop.py`, which demonstrates this.
 - PTM models are predictive and academic. Each is extracted at its node's
   nominal channel length, so a much longer L is an extrapolation.
 - The flicker-noise parameters are absent from the PTM cards, so 1/f
