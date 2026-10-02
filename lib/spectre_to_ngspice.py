@@ -186,6 +186,21 @@ def parse_number(text) -> tuple[float | None, str | None]:
     return None, None
 
 
+# A suffixed number inside an expression, not part of an identifier. ngspice
+# would read `1M` in `{(1M)}` as milli, so every such token is rewritten.
+_EXPR_NUM = re.compile(
+    r"(?<![\w.])((?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)"
+    r"(meg|MEG|Meg|[TGMKkmunpfa])(?![\w.])"
+)
+
+
+def _unsuffix_expr(expr: str) -> str:
+    """Rewrite Spectre-suffixed numbers in an expression as plain floats."""
+    return _EXPR_NUM.sub(
+        lambda m: _fmt_float(spectre_number(m.group(0))), expr
+    )
+
+
 def emit_value(text, warnings: list[str] | None = None, where: str = "") -> str:
     """Literal -> unsuffixed float; expression -> {expr} plus a warning."""
     n, note = parse_number(text)
@@ -193,7 +208,16 @@ def emit_value(text, warnings: list[str] | None = None, where: str = "") -> str:
         warnings.append("%s: %s" % (where or "value", note))
     if n is not None:
         return _fmt_float(n)
+    # ADE wraps literals in parentheses: w=(245.1u), m=(1).
     inner = _strip_wrap(text)
+    bare = inner
+    while len(bare) >= 2 and bare[0] == "(" and bare[-1] == ")":
+        bare = bare[1:-1].strip()
+    if bare != inner:
+        n = spectre_number(bare)
+        if n is not None:
+            return _fmt_float(n)
+    inner = _unsuffix_expr(inner)
     if warnings is not None:
         warnings.append(
             "%s: expression %s emitted in { } (not a Spectre numeric literal)"
@@ -202,11 +226,18 @@ def emit_value(text, warnings: list[str] | None = None, where: str = "") -> str:
     return "{%s}" % inner
 
 
+# Spectre grounds only node 0; ngspice also grounds `gnd` (case-insensitive).
+GND_RENAME = "gnd_net"
+
+
 def sanitize_node(name: str, node_map: dict[str, str]) -> str:
     raw = str(name)
     if raw == "0":
         node_map.setdefault("0", "0")
         return "0"
+    if raw.lower() == "gnd":
+        node_map[raw] = GND_RENAME
+        return GND_RENAME
     mapped = _NODE_BAD.sub("_", raw)
     node_map[raw] = mapped
     return mapped
@@ -425,6 +456,12 @@ class _Translator:
         self._emit_saves()
         self._emit_analyses()
         self.emit(".end")
+        gnd = sorted(k for k in self.node_map if k.lower() == "gnd")
+        if gnd:
+            self.warn(
+                "net %s renamed to %s: Spectre grounds only node 0, but ngspice "
+                "would silently ground it" % (gnd[0], GND_RENAME)
+            )
         deck = "\n".join(self.lines) + "\n"
         offenders = lint(deck)
         if offenders:
@@ -779,6 +816,11 @@ class _Translator:
     def _emit_analyses(self) -> None:
         for ana in getattr(self.nl, "analyses", None) or []:
             atype = (ana.type or "").lower()
+            if atype == "info":
+                # Output-only (writes oppoint/model tables); no effect on results.
+                self.warn("info %s (what=%s) dropped: output-only statement"
+                          % (ana.name, ana.params.get("what", "?")))
+                continue
             if atype in _UNSUPPORTED_ANALYSIS or atype not in _SUPPORTED_ANALYSIS:
                 if atype == "op":
                     self.emit(".op")

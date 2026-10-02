@@ -24,6 +24,16 @@ MAX_OPTION_ROWS = 20
 MAX_SAVE_ITEMS = 24
 MAX_INCLUDE_ROWS = 20
 MAX_ANALYSIS_ROWS = 24
+
+# Options ADE writes into every netlist with these exact values. They carry no
+# design information, so the digest folds them into one line and lists only
+# options that differ.
+ADE_DEFAULT_OPTIONS = {
+    "psfversion": '"1.4.0"', "reltol": "1e-3", "vabstol": "1e-6", "iabstol": "1e-12",
+    "temp": "27", "tnom": "27", "scalem": "1.0", "scale": "1.0", "gmin": "1e-12",
+    "rforce": "1", "maxnotes": "5", "maxwarns": "5", "digits": "5", "cols": "80",
+    "pivrel": "1e-3", "checklimitdest": "psf", "save": "allpub",
+}
 MAX_DEVICE_ROWS = 40
 MAX_NET_ROWS = 12
 MAX_MASTERS_IN_OUTLINE = 6
@@ -190,9 +200,14 @@ def summary(nl) -> str:
     if not analyses:
         sections.append("  (none)")
     else:
-        extra = 0
+        # ADE emits up to eight output-only `info` statements; one line covers them.
+        infos = [an for an in analyses if str(getattr(an, "type", "")).lower() == "info"]
+        analyses = [an for an in analyses if an not in infos]
         shown = analyses[:MAX_ANALYSIS_ROWS]
         extra = max(0, len(analyses) - len(shown))
+        if infos:
+            whats = [str(_as_dict(getattr(an, "params", None)).get("what", "?")) for an in infos]
+            sections.append(_fit("  info x%d  what=%s" % (len(infos), ",".join(whats))))
         for an in shown:
             name = str(getattr(an, "name", "?"))
             typ = str(getattr(an, "type", "?"))
@@ -224,10 +239,11 @@ def summary(nl) -> str:
             path = str(getattr(inc, "path", ""))
             section = getattr(inc, "section", None)
             kind = str(getattr(inc, "kind", "include") or "include")
-            bit = f"  {kind} {path}"
-            if section:
-                bit += f" section={section}"
-            sections.append(_fit(bit))
+            tail = f" section={section}" if section else ""
+            room = MAX_WIDTH - len(kind) - len(tail) - 3
+            if len(path) > room > 10:   # keep the file name and the corner
+                path = "..." + path[-(room - 3):]
+            sections.append(_fit(f"  {kind} {path}{tail}"))
         if extra:
             sections.append(_fit(f"  +{extra} more includes"))
 
@@ -237,6 +253,10 @@ def summary(nl) -> str:
         sections.append("  (none)")
     else:
         items = sorted(options.items(), key=lambda kv: kv[0])
+        n_default = sum(1 for k, v in items if ADE_DEFAULT_OPTIONS.get(k) == str(v))
+        items = [(k, v) for k, v in items if ADE_DEFAULT_OPTIONS.get(k) != str(v)]
+        if n_default:
+            sections.append(f"  ({n_default} ADE defaults)")
         extra = 0
         if len(items) > MAX_OPTION_ROWS:
             extra = len(items) - MAX_OPTION_ROWS

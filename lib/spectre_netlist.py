@@ -83,7 +83,7 @@ ANALYSIS_TYPES = frozenset({
     "montecarlo", "tf", "tdr", "envlp", "pac", "pnoise", "pxf", "pstb",
     "psp", "qpss", "qpac", "qpstb", "qpnoise", "qpxf", "dcmatch",
     "reliability", "hb", "hbac", "hbnoise", "op", "alter", "altergroup",
-    "sweep", "sens",
+    "sweep", "sens", "info",
 })
 
 WRAPPER_TYPES = frozenset({"sweep", "alter", "altergroup", "montecarlo"})
@@ -582,7 +582,12 @@ def _standalone_slash(text: str, i: int) -> bool:
     nxt = text[i + 1] if i + 1 < len(text) else " "
     if i + 1 < len(text) and text[i + 1] in "/*":
         return False
-    return prev.isspace() and nxt.isspace()
+    if not (prev.isspace() and nxt.isspace()):
+        return False
+    # ` / ` before an operand is division, not a statement separator: ADE
+    # writes CDF-computed values such as `as=(...) ? (...) : (...) / 1`.
+    m = re.match(r"[ \t]*(?:[\d.(]|[A-Za-z_]\w*\()", text[i + 1:])
+    return m is None
 
 
 def _split_slash(text: str, lang: str = "spectre") -> list[tuple[int, int]]:

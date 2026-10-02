@@ -19,6 +19,7 @@ if str(LIB) not in sys.path:
 
 from spectre_netlist import (  # noqa: E402
     Include,
+    find_instances,
     parse_file,
     parse_netlist,
     write_netlist,
@@ -548,6 +549,53 @@ def test_simulate_op_only_resistor() -> None:
             v, res.get("nodes")))
 
 
+def test_ade_spectre_semantics() -> None:
+    """Constructs found in real Virtuoso/ADE netlists, checked against Spectre.
+
+    Reference behaviour from Spectre 23.1 (V(b) = 0.999001 V, V(gnd) = V(b)):
+    `gnd` is an ordinary net in Spectre - only node 0 is ground - and r=(1M)
+    is one megohm. The translator used to emit {(1M)} (milli in ngspice) and
+    leave `gnd` for ngspice to ground silently, giving V(b) = 1 uV.
+    """
+    text = (
+        "simulator lang=spectre\n"
+        "V1 (a 0) vsource dc=1\n"
+        "R1 (a b) resistor r=1k\n"
+        "R2 (b gnd) resistor r=1k\n"
+        "R3 (b 0) resistor r=(1M)\n"
+        "op dc\n"
+        "dcOpInfo info what=oppoint where=rawfile\n"
+    )
+    nl = parse_netlist(text)
+    check("info is an analysis, not an instance",
+          find_instances(nl, master="info") == []
+          and any(a.type == "info" for a in nl.analyses),
+          [a.type for a in nl.analyses])
+    tr = translate(nl)
+    check("(1M) is mega, emitted unsuffixed", "RR3 b 0 1000000" in tr.netlist,
+          tr.netlist)
+    check("gnd renamed so ngspice cannot ground it",
+          " gnd " not in tr.netlist and "gnd_net" in tr.netlist, tr.netlist)
+    check("gnd rename is warned", any("gnd" in w and "renamed" in w
+                                      for w in tr.warnings), tr.warnings)
+    check("info not reported as an unsupported instance",
+          not any("info" in u for u in tr.unsupported), tr.unsupported)
+    res = simulate(nl)
+    v = (res.get("nodes") or {}).get("b")
+    ref = 1e6 / (1e3 + 1e6)
+    check("V(b) matches Spectre 0.999001", res.get("ok") and v is not None
+          and abs(v - ref) < 1e-9, "V(b)=%s err=%s" % (v, res.get("error")))
+
+    nl2 = parse_netlist(
+        "simulator lang=spectre\n"
+        "parameters k=2\n"
+        "M0 (d g 0 0) nch w=(245.1u) l=k*(45n) m=(1)\n")
+    deck = translate(nl2).netlist
+    check("ADE parenthesized literal unwrapped", "w=0.0002451" in deck, deck)
+    check("suffix inside an expression rewritten", "l={k*(4.5e-08)}" in deck, deck)
+    check("parenthesized m=(1) is plain 1", "m=1" in deck, deck)
+
+
 def main() -> int:
     print("=== test_translate.py ===\n")
     test_corpus_translate()
@@ -567,6 +615,8 @@ def main() -> int:
     test_tune_reexport()
     print()
     test_tune_unreachable_and_multiknob()
+    print()
+    test_ade_spectre_semantics()
     print()
     print("%d passed, %d failed" % (PASSES, FAILURES))
     return 1 if FAILURES else 0

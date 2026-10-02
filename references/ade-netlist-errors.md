@@ -444,6 +444,21 @@ Symptom is still SFE-23 or "unable to open file". Detect: `include` path exists 
 
 Usually tolerated (Spectre treats `0` as ground). Still flag schematic nets named `gnd!` that were not declared `global` and never tied to `0`.
 
+### 14.4 A net named `gnd` treated as ground
+
+Spectre grounds only node `0`. A schematic net labelled `gnd` (not `gnd!`, not
+the analogLib `gnd` symbol) is an ordinary node and floats: a real ADE run here
+reported `gnd` at 0.348 V with every NMOS source tied to it. ngspice, by
+contrast, aliases `gnd` to ground, so a translated deck hides the fault.
+Detect: a net literally named `gnd` with no path to `0`. The translator renames
+it `gnd_net` and warns.
+
+### 14.5 Parenthesized literal with an `M` suffix
+
+ADE writes `r=(1M)`, `w=(245.1u)`, `m=(1)`. In Spectre `(1M)` is 1e6; copied
+into ngspice braces as `{(1M)}` it becomes 1e-3. The translator unwraps
+parenthesized literals and rewrites every suffixed number inside an expression.
+
 ---
 
 ## Mechanical checker checklist
