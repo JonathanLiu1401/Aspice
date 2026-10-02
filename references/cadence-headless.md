@@ -10,7 +10,14 @@ FreePDK45). Each item is a behaviour the backend depends on or works around.
 |---|---|
 | A tool | `ASPICE_<TOOL>` env var -> `PATH` -> `ASPICE_EDA_ROOTS` (colon list) -> built-in roots (`/home/lab.apps/vlsiapps_new`, `/home/lab.apps/vlsiapps`, `/opt/cadence`, ...) |
 | Licenses | environment, else `setenv` lines in `<root>/cshrc/licenses.cshrc` |
-| cds.lib | `ASPICE_CDS_LIB` -> `~/.config/aspice/cadence.json` (`CD.configure(cds_lib=...)`) -> `./cds.lib` -> `~/cds.lib` -> newest `~/*/cds.lib` |
+| Project | `$ASPICE_PROJECT` -> the registered project whose directory contains the cwd -> the active project (`use_project`) |
+| cds.lib | `ASPICE_CDS_LIB` -> the project's cds.lib -> `cds_lib` from `configure()` -> `./cds.lib` -> `~/cds.lib` -> newest `~/*/cds.lib` |
+| Extra env | the project's `env` (e.g. `PDK_DIR`) is applied to every tool run and to `$VAR` expansion in cds.lib |
+
+Projects live in `~/.config/aspice/cadence.json`:
+`CD.add_project('EE476', '~/EE476/cadence/cds.lib', env={'PDK_DIR': ...})`.
+A csh `setenv` in `~/.cshrc` does not reach aspice (its tools run from Python,
+not a login csh), which is why a project carries its own env.
 
 Pin the cds.lib. Auto-picking the newest one silently switched projects
 mid-session when a second course directory appeared; `doctor()` now lists

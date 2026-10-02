@@ -202,6 +202,41 @@ with tempfile.TemporaryDirectory() as tmp:
           Path(lm).read_text().split() == ['active', 'drawing', '1', '0',
                                            'metal1', 'drawing', '11', '0'])
 CD.environment(refresh=True)
+
+# Projects: each carries its own cds.lib and env (e.g. PDK_DIR). Uses a temp
+# config so the user's ~/.config/aspice/cadence.json is not touched.
+with tempfile.TemporaryDirectory() as tmp:
+    t = Path(tmp)
+    saved = (CD.CONFIG_PATH, os.environ.pop('ASPICE_PROJECT', None),
+             os.environ.pop('ASPICE_CDS_LIB', None), Path.cwd())
+    CD.CONFIG_PATH = t / 'cfg.json'
+    try:
+        for n in ('A', 'B'):
+            (t / n).mkdir()
+            (t / n / 'cds.lib').write_text('DEFINE lib%s $KIT_%s/lib\n' % (n, n))
+            (t / ('kit' + n) / 'lib').mkdir(parents=True)
+        CD.add_project('A', t / 'A' / 'cds.lib', env={'KIT_A': str(t / 'kitA')})
+        CD.add_project('B', t / 'B' / 'cds.lib', env={'KIT_B': str(t / 'kitB')})
+        check('first project becomes active', CD.current_project()[0] == 'A')
+        check('project env resolves its cds.lib', CD.read_cds_lib()['libA']['exists'])
+        os.chdir(t / 'B')
+        check('working inside a project directory selects it',
+              CD.current_project()[0] == 'B' and CD.environment(refresh=True).cds_lib
+              == str(t / 'B' / 'cds.lib'))
+        os.chdir(t)
+        os.environ['ASPICE_PROJECT'] = 'B'
+        check('$ASPICE_PROJECT overrides the active project', CD.current_project()[0] == 'B')
+        del os.environ['ASPICE_PROJECT']
+        CD.use_project('B')
+        check('use_project switches the default', CD.current_project()[0] == 'B'
+              and CD.environment(refresh=True).env.get('KIT_B') == str(t / 'kitB'))
+    finally:
+        CD.CONFIG_PATH = saved[0]
+        os.chdir(saved[3])
+        for k, v in (('ASPICE_PROJECT', saved[1]), ('ASPICE_CDS_LIB', saved[2])):
+            if v is not None:
+                os.environ[k] = v
+        CD.environment(refresh=True)
 try:
     CD.edit_instance_params('mylib', 'amp', {'M0': {'w': '1u'}})
     check('edits to a user library refused without allow_write', False, 'no exception')

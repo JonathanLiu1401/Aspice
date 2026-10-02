@@ -145,13 +145,56 @@ def cds_lib_candidates():
     return sorted(hits, key=os.path.getmtime, reverse=True)
 
 
+def add_project(name, cds_lib, env=None, activate=False):
+    """Register a Cadence project: its cds.lib and the environment variables
+    its cds.lib / rule decks need (e.g. ``{'PDK_DIR': ...}``). Persisted in
+    ~/.config/aspice/cadence.json."""
+    cfg = load_config()
+    cfg.setdefault('projects', {})[name] = {
+        'cds_lib': str(Path(cds_lib).expanduser()), 'env': dict(env or {})}
+    if activate or not cfg.get('active'):
+        cfg['active'] = name
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + '\n')
+    environment(refresh=True)
+    return cfg
+
+
+def use_project(name):
+    """Make a registered project the default for every call."""
+    cfg = load_config()
+    if name not in cfg.get('projects', {}):
+        raise KeyError('no project %r; known: %s' % (name, sorted(cfg.get('projects', {}))))
+    cfg['active'] = name
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + '\n')
+    environment(refresh=True)
+    return name
+
+
+def current_project():
+    """(name, settings) of the project in effect: $ASPICE_PROJECT, else the one
+    whose directory contains the working directory, else the active one."""
+    projects = load_config().get('projects', {})
+    name = os.environ.get('ASPICE_PROJECT')
+    if name in projects:
+        return name, projects[name]
+    cwd = Path.cwd().resolve()
+    for n, pr in projects.items():
+        root = Path(pr['cds_lib']).expanduser().resolve().parent
+        if cwd == root or root in cwd.parents:
+            return n, pr
+    name = load_config().get('active')
+    return (name, projects[name]) if name in projects else (None, {})
+
+
 def find_cds_lib():
-    """The user's cds.lib, in order: $ASPICE_CDS_LIB, the ``cds_lib`` saved by
-    configure(), ./cds.lib, ~/cds.lib, else the only ~/*/cds.lib or
+    """The user's cds.lib, in order: $ASPICE_CDS_LIB, the current project
+    (see current_project), the ``cds_lib`` saved by configure(), ./cds.lib, ~/cds.lib, else the only ~/*/cds.lib or
     ~/*/*/cds.lib. With several candidates and no choice made, the newest is
     used and doctor() lists the others - set one explicitly with configure().
     """
-    env = os.environ.get('ASPICE_CDS_LIB') or load_config().get('cds_lib')
+    env = os.environ.get('ASPICE_CDS_LIB') or current_project()[1].get('cds_lib') \
+        or load_config().get('cds_lib')
     if env:
         return str(Path(env).expanduser())
     for c in (Path.cwd() / 'cds.lib', Path.home() / 'cds.lib'):
@@ -193,6 +236,7 @@ def environment(refresh=False):
         return _ENV_CACHE
     tools = {t: _find_tool(t) for t in _TOOLS}
     env = dict(os.environ)
+    env.update(current_project()[1].get('env', {}))
     site = _site_licenses()
     for var in _LICENSE_VARS:
         if not env.get(var) and site.get(var):
@@ -1601,7 +1645,15 @@ def doctor(live=True):
         lines.append('  %-9s %s' % (t, p or 'NOT FOUND'))
     for v in _LICENSE_VARS:
         lines.append('  %-17s %s' % (v, ce.env.get(v) or 'unset'))
-    chosen = bool(os.environ.get('ASPICE_CDS_LIB') or load_config().get('cds_lib'))
+    pname, pr = current_project()
+    projects = load_config().get('projects', {})
+    if projects:
+        lines.append('  projects  %s' % ', '.join(
+            ('[%s]' if n == pname else '%s') % n for n in sorted(projects)))
+        for k, v in pr.get('env', {}).items():
+            lines.append('  %-9s %s%s' % (k, v, '' if Path(v).exists() else '  (MISSING)'))
+    chosen = bool(os.environ.get('ASPICE_CDS_LIB') or pr.get('cds_lib')
+                  or load_config().get('cds_lib'))
     lines.append('  cds.lib   %s%s' % (ce.cds_lib or 'not found (cadence.configure(cds_lib=...))',
                                       '' if chosen or not ce.cds_lib else '  (auto-picked)'))
     others = [c for c in cds_lib_candidates() if c != ce.cds_lib]

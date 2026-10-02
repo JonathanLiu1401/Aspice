@@ -41,7 +41,7 @@ card in Spectre and in ngspice gives node voltages within 0.05%.
 | Python + PySpice + ngspice | the venv interpreter that has PySpice (here: `~/.claude/skills-venv/bin/python`; ngspice 47 at `~/opt/ngspice`) |
 | Libraries | `<skill>/lib/` |
 | Technology models | `<skill>/models/` - if empty, run `scripts/fetch_models.py` |
-| Cadence (optional) | found automatically: `CD.doctor()` lists tools, licenses, the `cds.lib` in use. Pin the project with `CD.configure(cds_lib='~/EE332/cadence/cds.lib')` |
+| Cadence (optional) | found automatically: `CD.doctor()` lists tools, licenses, projects, the `cds.lib` in use. Projects here: **EE332** (gpdk045, `~/EE332/cadence`) and **EE476** (FreePDK45 + Nangate, `~/EE476/cadence`, `PDK_DIR` set). Selected by `$ASPICE_PROJECT`, else the project whose directory is the cwd, else the active one (`CD.use_project('EE476')`); a single call can pass `cds_lib=`. Register more with `CD.add_project(name, cds_lib, env={...})` |
 | Verifiers | `scripts/analog_selftest.py`, `test_parser.py`, `test_digest.py`, `test_integration.py`, `test_translate.py`, `test_export.py`, `test_pdk_plots.py`, `test_cadence.py`; end to end on your data: `cadence_loop.py` |
 
 Always use that interpreter; PySpice is not on the system Python. If anything
