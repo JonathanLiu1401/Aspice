@@ -139,6 +139,35 @@ with tempfile.TemporaryDirectory() as tmp:
     check('a card after .endl belongs to no corner',
           by_name['rpoly'].section is None, by_name['rpoly'].section)
 
+print('\n1c. Spectre-dialect kits: device wrappers and probe (gpdk045 layout)')
+# gpdk045 wraps its BSIM4 `nch` card in `inline subckt g45n1svt`, and schematics
+# instantiate g45n1svt. Scanning only `model` lines misses the name that matters.
+# Its top file is Spectre-only (simulator lang=spectre / library / section), which
+# ngspice cannot parse; probe() used to hand it over and fail with a bare
+# "Command 'run' failed".
+with tempfile.TemporaryDirectory() as tmp:
+    kit_file = Path(tmp) / 'kit.scs'
+    kit_file.write_text(
+        'simulator lang=spectre\n'
+        'library kit\n'
+        'section tt\n'
+        'model nch bsim4 { type=n level=54 }\n'
+        'inline subckt g45n1svt ( d g s b )\n'
+        'g45n1svt ( d g s b ) nch\n'
+        'ends g45n1svt\n'
+        'endsection tt\n'
+        'endlibrary kit\n')
+    k = PDK.scan(kit_file)
+    check('inline subckt wrapper listed', 'g45n1svt' in k.subckt_names(),
+          k.subckt_names())
+    check('wrapper shown in summary', 'g45n1svt' in k.summary())
+    pr = PDK.probe(kit_file, 'g45n1svt')
+    # With Spectre installed probe() hands the kit to Spectre instead (this
+    # stub kit has no real card, so that run fails too, but says so).
+    check('a Spectre-dialect file is refused by ngspice or routed to Spectre',
+          not pr['ok'] and ('Spectre-dialect' in pr['error'] or pr.get('simulator') == 'spectre'),
+          pr.get('error'))
+
 print('\n2. Scanning something that is not a PDK fails honestly')
 with tempfile.TemporaryDirectory() as tmp:
     (Path(tmp) / 'notes.txt').write_text('nothing to see here\n')

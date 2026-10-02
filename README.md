@@ -2,7 +2,10 @@
 
 A Claude Code skill for transistor-level analog CMOS design and for working with
 Cadence ADE / Spectre netlists, built on [PySpice](https://pyspice.fabrice-salvaire.fr/)
-and [ngspice](https://ngspice.sourceforge.io/).
+and [ngspice](https://ngspice.sourceforge.io/) - and, on a machine that has
+Cadence, a headless driver for Spectre, Virtuoso, OCEAN and Calibre so a design
+can be read, checked, edited, simulated with the real PDK and DRC/LVS-verified
+in place.
 
 Two things it is meant to fix:
 
@@ -13,6 +16,9 @@ Two things it is meant to fix:
 2. **Netlists too large to read.** A real ADE netlist runs to tens of thousands
    of lines. Parsing it into a compact digest is a ~270x token reduction, so an
    agent reads a summary and pulls raw text only where it matters.
+3. **Going back and forth to the Cadence machine.** When Cadence is installed
+   locally, `lib/cadence.py` runs it headlessly in scratch directories: no file
+   shuttling, and nothing in your libraries or `~/simulation` is written.
 
 ## What is in it
 
@@ -25,6 +31,7 @@ Two things it is meant to fix:
 | `lib/netlist_export.py` | Describe a circuit once; emit CDL and Spectre with the PDK's CDF names for Cadence, and a SPICE deck that simulates locally |
 | `lib/pdk.py` | Scan a PDK you supply: model files, corners, device names, model families; probe a device to confirm it biases |
 | `lib/plots.py` | Design charts from a real PDK: I-V families, transfer curves, the gm/ID chart, Bode with phase margin, target sweeps |
+| `lib/cadence.py` | Headless Cadence: tool/license discovery and `doctor()`; Spectre runs with PSF parsing (op, sweeps, AC, oppoint device tables); ADE/Maestro result reading incl. PSF XL; schematic read / schCheck / build / edit-on-a-copy; OCEAN netlisting; layout read, stream in/out; Calibre DRC/LVS; real-PDK device probing; Spectre-vs-ngspice cross-check |
 
 Plus 19 realistic ADE netlists with ground-truth JSON in `corpus/`, three
 verified worked examples in `examples/`, and reference material in
@@ -32,11 +39,11 @@ verified worked examples in `examples/`, and reference material in
 
 ## Setup
 
-Requires Python 3, PySpice 1.4.3 and ngspice (>= 33; tested on 44.2).
+Requires Python 3, PySpice 1.4.3 and ngspice (>= 33; tested on 44.2 and 47).
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install "PySpice==1.4.3"
+.venv/Scripts/python -m pip install "PySpice==1.4.3"   # Linux/macOS: .venv/bin/python
 python scripts/fetch_models.py      # download the transistor models
 ```
 
@@ -105,7 +112,9 @@ python scripts/test_integration.py    # parser + digest over the whole corpus
 python scripts/test_translate.py      # translate / simulate / tune tests
 python scripts/test_export.py         # netlist generation and export
 python scripts/test_pdk_plots.py      # PDK scanning and design charts
+python scripts/test_cadence.py        # headless Cadence (live parts SKIP without it)
 python scripts/bench_tokens.py        # compression benchmark
+python scripts/cadence_loop.py        # end to end on YOUR Cadence data (read-only)
 ```
 
 The self-test compares against independently computed answers rather than
@@ -134,6 +143,12 @@ Found by measurement while building this, and encoded in the tools:
 - **A PDK's `w` is a finger width in one process and a total width in another.**
   Sizing is therefore always expressed as `w_f` (per finger) and `n_f` (count),
   and a total-width parameter is computed, never assumed.
+- **`gnd` is not ground in Spectre** (only `0` is), but ngspice grounds it. The
+  translator renames it. ADE's parenthesized literals (`r=(1M)`) are unwrapped
+  so `M` stays mega.
+- **The simulators agree, the models do not.** One BSIM4 card in Spectre and in
+  ngspice: within 0.05%. PTM 45nm vs gpdk045 at the same bias: 3-60x apart at
+  L=45n. See `references/cadence-headless.md`.
 - **Reading a target off a swept curve is not accurate enough.** Linear
   interpolation between sweep points missed a 0.9 V target by 110 mV on a steep
   width sweep, so crossings are refined by bisection.
@@ -156,17 +171,33 @@ spec, re-export a configured ADE netlist that still points at the real PDK,
 and re-simulate from the exported file to confirm it holds. No Cadence, no
 Spectre, no proprietary PDK.
 
+## Using Cadence on the same machine
+
+```python
+import cadence as CD
+print(CD.doctor())                                   # tools, licenses, cds.lib
+CD.configure(cds_lib='~/EE332/cadence/cds.lib')     # pin the project once
+r = CD.simulate_cell('lab5', '5ota_tb', analyses='dcOp dc\ndcOpInfo info what=oppoint where=rawfile\n')
+print(r.device_table())                              # regions, gm/Id, gm*ro from Spectre
+cl = CD.copy_cell('lab3', 'inverter')                # edits go to a scratch copy
+CD.edit_instance_params(CD.SCRATCH_LIB, 'inverter', {'PM0': {'w': '520n'}}, cds_lib=cl)
+CD.calibre_lvs('top.gds', 'top', 'top.src.net', 'kit/calibreLVS.rul')
+```
+
+Measured on the UW ECE lab install (IC23.1, Spectre 23.1, Calibre 2021.1,
+gpdk045): 381 unique ADE netlists parse, round-trip and translate; re-running
+stored ADE points in Spectre reproduces the stored results to 3e-16 V; DRC and
+LVS reproduce Calibre Interactive's reports.
+
 ## Scope and limits
 
-- **Cadence is not required and was not available.** Netlists are simulated
-  with ngspice, so simulation of a Spectre netlist is a translation. Parsing,
-  digesting and editing are exact and round-trip byte-identically; nothing here
-  has been checked against a real Spectre run.
-- Four things can only be checked on a machine with Virtuoso: Spectre's own
-  numbers, the licensed PDK's models, whether `spiceIn` really imports the
-  netlist, and how `section=tt` and the corner structure resolve in your kit.
-  A model swap in particular moves the operating point, so never carry a bias
-  point across one. See `scripts/offline_loop.py`, which demonstrates this.
+- **Without Cadence**, netlists are simulated with ngspice, so simulating a
+  Spectre netlist is a translation and the translation reports what it dropped.
+  A model swap moves the operating point (`scripts/offline_loop.py` shows it),
+  so never carry a bias point across one.
+- **With Cadence**, Spectre and the real PDK answer directly. Not covered:
+  `spiceIn` (`build_schematic` replaces it), PEX, PVS decks (gpdk045's own
+  DRC/LVS), and post-processing of `stb`/`pss`/Monte Carlo beyond raw PSF.
 - PTM models are predictive and academic. Each is extracted at its node's
   nominal channel length, so a much longer L is an extrapolation.
 - The flicker-noise parameters are absent from the PTM cards, so 1/f

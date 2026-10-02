@@ -1,13 +1,13 @@
 ---
 name: aspice
-description: Use when solving, simulating, or checking analog CMOS integrated-circuit work - MOSFET biasing, saturation and overdrive checks, gm/ID sizing, common-source/cascode/source-follower/differential-pair/current-mirror analysis, op-amp gain and phase margin, frequency response and Miller effect, thermal and flicker noise, feedback and stability, Razavi "Design of Analog CMOS Integrated Circuits" exercises - and when reading, debugging, simulating, tuning, or re-exporting a Cadence ADE / Spectre netlist (.scs), including any large netlist that must be summarised before it can be reasoned about.
+description: Use when solving, simulating, or checking analog CMOS integrated-circuit work - MOSFET biasing, saturation and overdrive checks, gm/ID sizing, common-source/cascode/source-follower/differential-pair/current-mirror analysis, op-amp gain and phase margin, frequency response and Miller effect, thermal and flicker noise, feedback and stability, Razavi "Design of Analog CMOS Integrated Circuits" exercises - and when reading, debugging, simulating, tuning, or re-exporting a Cadence ADE / Spectre netlist (.scs), including any large netlist that must be summarised before it can be reasoned about - and, on a machine with Cadence, when driving Virtuoso / Spectre / Calibre headlessly: reading or checking schematics and layouts, netlisting a cell, simulating with the real PDK (gpdk045, FreePDK45), reading ADE/Maestro PSF results, editing a design and re-verifying it, or running DRC/LVS.
 ---
 
 # aspice - agentic SPICE for analog design
 
 ## Overview
 
-Two jobs, one toolkit.
+Three jobs, one toolkit.
 
 **Analog design and analysis.** Textbook answers go wrong in two places: a
 device silently sitting in triode instead of saturation, and a hand formula
@@ -19,14 +19,30 @@ printed table. A number that exists only one way is not an answer yet.
 lines and must never be read raw. Parse it, read a compact digest, and pull
 raw fragments only where detail is actually needed.
 
+**Cadence itself, headlessly (Part 4).** When Spectre / Virtuoso / Calibre are
+on this machine, everything runs here: read and schCheck schematics, build or
+edit a cell (on a scratch copy), netlist it, simulate it in Spectre against the
+real PDK, read ADE results, stream layout out and run DRC/LVS. No copying files
+to another machine.
+
+**Which simulator answers which question.** If `CD.environment().has('spectre')`,
+any number that is a prediction for a real design (bias, gain, swing, margins)
+comes from **Spectre + the real PDK**. ngspice + PTM is for verifying hand
+formulas, fast exploratory sweeps, and machines without Cadence. Never present a
+PTM number as a gpdk045 prediction: measured at the same W/L/bias, PTM-45nm-HP
+passes 3-60x the gpdk045 current at L=45n and 0.7-1.5x at L=180n-1u, and no PTM
+card tracks gpdk045 across L. The simulators themselves agree: the same BSIM4
+card in Spectre and in ngspice gives node voltages within 0.05%.
+
 ## Setup
 
 | Thing | Where |
 |---|---|
-| Python + PySpice + ngspice | the venv interpreter that has PySpice (here: `~/.venvs/pyspice/Scripts/python.exe`) |
+| Python + PySpice + ngspice | the venv interpreter that has PySpice (here: `~/.claude/skills-venv/bin/python`; ngspice 47 at `~/opt/ngspice`) |
 | Libraries | `<skill>/lib/` |
 | Technology models | `<skill>/models/` - if empty, run `scripts/fetch_models.py` |
-| Verifiers | `scripts/analog_selftest.py`, `test_parser.py`, `test_digest.py`, `test_integration.py`, `test_translate.py`, `test_export.py`, `test_pdk_plots.py` |
+| Cadence (optional) | found automatically: `CD.doctor()` lists tools, licenses, the `cds.lib` in use. Pin the project with `CD.configure(cds_lib='~/EE332/cadence/cds.lib')` |
+| Verifiers | `scripts/analog_selftest.py`, `test_parser.py`, `test_digest.py`, `test_integration.py`, `test_translate.py`, `test_export.py`, `test_pdk_plots.py`, `test_cadence.py`; end to end on your data: `cadence_loop.py` |
 
 Always use that interpreter; PySpice is not on the system Python. If anything
 looks broken, run `scripts/analog_selftest.py` - it checks 13 groups of results
@@ -40,6 +56,7 @@ import netlist_digest as ND             # compact views of a big netlist
 import spectre_to_ngspice as TR         # translate, simulate, tune, re-export
 import netlist_export as NX             # describe a circuit, export it to Cadence
 import pdk, plots                       # read a PDK; draw design charts
+import cadence as CD                    # Spectre, Virtuoso, OCEAN, Calibre, headless
 ```
 
 Import `analog_spice` **instead of** importing PySpice directly - it repairs
@@ -172,7 +189,13 @@ value it reached and says plainly when a target was not met.
 - **`M` means mega in Spectre and milli in SPICE** - a silent 1e9 error.
 - **Trailing `A` is atto and `F` is femto in ngspice**, not amp and farad.
 - **`include ... section=tt`** picks a corner; a missing section changes results
-  without any error.
+  without any error. ADE defaults gpdk045 to `section=mc`.
+- **`gnd` is not ground in Spectre.** Only node `0` is; a net named `gnd` floats
+  (seen in a real ADE run: `gnd` at 0.348 V). ngspice grounds `gnd` silently, so
+  the translator renames it `gnd_net` and warns. `gnd!` via `global` is separate.
+- **ADE parenthesizes literals:** `w=(245.1u)`, `m=(1)`, `r=(1M)`. The translator
+  unwraps them and rewrites suffixes inside expressions (`(1M)` was once emitted
+  as `{(1M)}` = 1 milliohm in ngspice).
 
 `references/ade-netlist-errors.md` catalogues these with symptoms, detection
 and fixes. `references/spectre-syntax.md` is the syntax lookup table.
@@ -256,58 +279,67 @@ in one process and a total width in another, and nothing warns you. So `w_f` is
 always the finger width here, `n_f` the count, SPICE gets `w=w_f` and `m=n_f`,
 and a PDK total-width parameter is computed rather than assumed.
 
-## Verifying this without Cadence
+---
 
-Everything here runs with no Cadence, no Spectre and no licensed PDK. To prove
-the toolchain end to end in one command:
+# Part 4: Cadence on this machine, headless
 
-    python scripts/offline_loop.py
+All of it runs in scratch directories (`ASPICE_WORKDIR`). User libraries are
+opened read-only; anything that must write (schCheck, edits, builds, stream-in)
+works on a copy in the scratch library `aspice_scratch`. OCEAN's project dir is
+redirected (left alone it writes `~/simulation/<cell>`). `edit_instance_params`
+refuses a user library unless `allow_write=True` - only pass that when the user
+explicitly asks to change their design.
 
-That walks the full production round trip on `corpus/03_diffpair_ade.scs`, a
-netlist written the way Virtuoso writes them (CDF names, `$PDK ... section=tt`
-include, `simulator lang=spectre`): ingest and byte-identical round trip,
-digest instead of raw text, substitute an open model card for the licensed PDK,
-bias it in ngspice, tune two knobs to hit an output-common-mode spec, re-export
-a configured ADE netlist that still points at the real PDK, then re-simulate
-*from the exported file* to confirm it reproduces the target.
+| Task | Call |
+|---|---|
+| What is installed / licensed / which cds.lib | `print(CD.doctor())` |
+| Libraries, cells, views (no Virtuoso needed) | `CD.read_cds_lib()`, `CD.library_cells(path)` |
+| Read a schematic: pins, instances, CDF params, nets | `s = CD.schematic(lib, cell)`; `s.summary()`, `s.floating_nets()` |
+| schCheck (on a copy) | `CD.check_schematic(lib, cell)` |
+| Read a layout: bbox, lpp shape counts, labels, pins | `CD.layout(lib, cell)` |
+| Schematic -> Spectre netlist (OCEAN) | `CD.netlist_cell(lib, cell, section='tt', analyses='dcOp dc\n')` |
+| Schematic -> netlist -> Spectre -> results | `r = CD.simulate_cell(lib, cell, analyses=..., design_vars={...})` |
+| Run any Spectre netlist (path, text, IR) | `r = CD.run_spectre(nl)`; `r.summary()` |
+| Results | `r.op()['vout']`, `r.wave('ac', 'vout')`, `r.devices()['NM0']['gm']`, `r.device_table()` |
+| Saturation check from Spectre | `print(r.device_table())` - region, gm/Id, gm*ro, Vds-Vdsat |
+| Edit a design and re-verify | `cl = CD.copy_cell(lib, cell)`; `CD.edit_instance_params(CD.SCRATCH_LIB, cell, {'M0': {'w': '2u'}}, cds_lib=cl)`; `CD.simulate_cell(CD.SCRATCH_LIB, cell, ..., cds_lib=cl)` |
+| Build a cell from a device list | `cl = CD.build_schematic(cell, [(name, lib, cell, params, {term: net}), ...], pins=[...])` |
+| ADE/Maestro history | `CD.ade_runs()`; `CD.read_psf_dir(psf)`; transients in PSF XL: `CD.read_ade_waveform(psf, 'tran', ['VOUT'])` |
+| Real-PDK device data | `CD.spectre_probe(model_file, 'g45n1svt', w=, l=, vgs=, vds=, sweep_vgs=(0, 1, .01))`; `pdk.probe` routes here for Spectre-dialect kits |
+| Spectre vs ngspice on one deck | `CD.format_cross_check(CD.cross_check(text))` |
+| GDS out / in | `CD.stream_out(lib, cell)`; `CD.stream_in(gds, tech_lib=...)` (layer map found or generated) |
+| DRC / LVS (on copies) | `CD.calibre_drc(gds, top, deck)`; `CD.calibre_lvs(gds, top, src_netlist, deck)`; existing reports: `CD.parse_drc_summary`, `CD.parse_lvs_report` |
+| Raw SKILL | `CD.run_skill('printf("ASPICE|K|%s\\n" ...)')` - results come back as `records` |
 
-The eight suites in `scripts/` are the per-component version of the same thing:
+Workflow for a design question on this machine: `doctor` once -> `schematic`
+(+ `check_schematic`) -> `simulate_cell` with the real PDK -> `device_table` to
+prove regions -> hand analysis from Spectre's gm/gds -> `Reconcile`. To change
+the design: copy, edit, re-simulate, compare; touch the user's library only on
+explicit request. `references/cadence-headless.md` has the tool behaviours this
+depends on (OCEAN, PSF XL, `$PDK_DIR`, layer maps, SKILL pitfalls).
 
-    analog_selftest test_parser test_digest test_integration
-    test_translate  test_export test_pdk_plots offline_loop
+## Verification
 
-Run them from a clean clone. A lint false positive once appeared only when the
-repo path contained a hex-looking temp directory.
+Offline (no Cadence): `python scripts/offline_loop.py` plus the eight suites
+(`analog_selftest test_parser test_digest test_integration test_translate
+test_export test_pdk_plots offline_loop`). Parsing, digesting and editing are
+exact and round-trip byte-identically; numbers are checked against closed-form
+hand analysis, not golden files.
 
-**What offline testing genuinely covers.** Parsing, digesting and editing are
-exact and round-trip byte-identically, including the writer/parser fixed point
-(`emit -> parse -> emit` is stable). Circuits really are biased and swept, by
-ngspice, which is an independent implementation and not this code. Numbers are
-checked against closed-form hand analysis, not golden files.
+On a Cadence machine: `python scripts/test_cadence.py` (31 live checks: Spectre
+vs closed form, `gnd`/`(1M)` semantics, Spectre-vs-ngspice on one BSIM4 card,
+gpdk045 probe, build/read/schCheck/edit/netlist/simulate a schematic, draw a
+layout and catch DRC width/spacing) and `python scripts/cadence_loop.py` (your
+own data: re-runs recent ADE points and compares with the stored PSF, schChecks
+those cells, DRC/LVS with `--gds`). Measured on the UW ECE lab install (IC23.1,
+Spectre 23.1, Calibre 2021.1, gpdk045 v6.0): 381 unique ADE netlists parse,
+round-trip and translate; ADE re-runs match stored results to 3e-16 V.
 
-**What it cannot cover, and what the Linux box is for.** Four things:
-
-1. **Spectre's numbers.** ngspice is a different simulator with different model
-   implementations and convergence. Simulating a Spectre netlist here is a
-   translation, and the translation reports what it dropped. Nothing in this
-   skill has been checked against a real Spectre run.
-2. **The real PDK.** Substituting an open card for a licensed one moves the
-   operating point, sometimes a lot. `offline_loop.py` demonstrates this rather
-   than hiding it: the corpus diff pair was drawn for gpdk045 and, biased
-   against a 180 nm PTM card, its tail starves and both outputs sit near VDD
-   until the bias is retuned. Never carry a bias point across a model swap.
-3. **`spiceIn` import.** Whether Virtuoso actually builds the cellviews and
-   binds CDF parameters is only answerable on the machine with Virtuoso.
-4. **`.lib` corner and section semantics.** Which `section=tt` resolves to,
-   and how corners are organised, is a property of the kit you have.
-   `pdk.scan()` is tested against a nested synthetic kit covering both
-   dialects (SPICE `.lib`/`.endl` and Spectre `section`/`endsection`, with
-   `type=n`/`type=p` polarity), because the PTM cards in `models/` are flat
-   and carry no corner blocks at all. It has never been run against a real
-   licensed kit, so treat its first run on yours as the actual test.
-
-`export_package` records `verified_locally: False` in its manifest for exactly
-this reason. It is a claim about where the netlist has and has not been run.
+Still not covered: `spiceIn` (use `build_schematic` instead), Monte Carlo /
+`stb` / `pss` result post-processing beyond raw PSF, PEX, and PVS (gpdk045's
+own DRC/LVS decks are PVS, not Calibre). `export_package` still records
+`verified_locally: False`: on this machine verify the export by building it
+with `build_schematic` and simulating it in Spectre.
 
 ## References
 
@@ -315,5 +347,6 @@ this reason. It is a claim about where the netlist has and has not been run.
 - `references/razavi-map.md` - chapter-to-simulation map with the key formulas
 - `references/ade-netlist-errors.md` - Spectre failure catalogue
 - `references/spectre-syntax.md` - Spectre syntax reference
+- `references/cadence-headless.md` - how the headless Cadence backend works, and the tool behaviours it works around
 - `examples/` - runnable, verified scripts
 - `corpus/` - 19 realistic ADE netlists with ground-truth JSON

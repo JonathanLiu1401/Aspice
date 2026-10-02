@@ -58,6 +58,10 @@ _TYPE_RE = re.compile(r'\btype\s*=\s*([A-Za-z]+)', re.I)
 _INCLUDE_RE = re.compile(
     r'^\s*\.?(?:include|inc|lib)\s+"?([^"\s]+)"?(?:\s+(\S+))?', re.I | re.M)
 _LEVEL_RE = re.compile(r'\blevel\s*=\s*(\d+)', re.I)
+# Device wrappers such as gpdk045's `inline subckt g45n1svt` are the names a
+# schematic instantiates; the BSIM card inside is only `nch`.
+_SUBCKT_RE = re.compile(r'^\s*(?:inline\s+)?(?:\.subckt|subckt)\s+([^\s(]+)', re.I | re.M)
+_SPECTRE_LANG_RE = re.compile(r'^\s*simulator\s+lang\s*=\s*spectre', re.I | re.M)
 
 # Model type -> the kind of device it is, for grouping.
 _KIND = {'nmos': 'nmos', 'pmos': 'pmos', 'nch': 'nmos', 'pch': 'pmos',
@@ -134,6 +138,7 @@ class PdkFile:
     models: list = field(default_factory=list)
     sections: list = field(default_factory=list)
     includes: list = field(default_factory=list)
+    subckts: list = field(default_factory=list)
     size: int = 0
 
 
@@ -169,6 +174,15 @@ class Pdk:
                 out[m.kind].append(m.name)
         return out
 
+    def subckt_names(self):
+        """Subckt wrappers (e.g. g45n1svt) - the names schematics instantiate."""
+        seen = []
+        for f in self.files:
+            for n in f.subckts:
+                if n not in seen:
+                    seen.append(n)
+        return seen
+
     def find(self, pattern):
         """Models whose name matches a regex, case-insensitively."""
         rx = re.compile(pattern, re.I)
@@ -195,6 +209,11 @@ class Pdk:
                 shown = ', '.join(names[:8]) + (f' +{len(names) - 8} more'
                                                 if len(names) > 8 else '')
                 lines.append(f'    {kind:<10} {len(names):>4}  {shown}')
+        subckts = self.subckt_names()
+        if subckts:
+            shown = ', '.join(subckts[:8]) + (f' +{len(subckts) - 8} more'
+                                              if len(subckts) > 8 else '')
+            lines.append(f'  subckt wrappers: {len(subckts)}  {shown}')
         families = sorted({m.model_family for m in self.models
                            if m.kind in ('nmos', 'pmos')})
         if families:
@@ -291,11 +310,15 @@ def scan(root, max_files=4000, follow_includes=True):
                 dtype=dtype.group(1).lower() if dtype else None,
                 level=int(level.group(1)) if level else None))
 
+        for m in _SUBCKT_RE.finditer(text):
+            if m.group(1) not in entry.subckts:
+                entry.subckts.append(m.group(1))
+
         if follow_includes:
             for m in _INCLUDE_RE.finditer(text):
                 entry.includes.append((m.group(1), m.group(2)))
 
-        if entry.models or entry.sections or entry.includes:
+        if entry.models or entry.sections or entry.includes or entry.subckts:
             pdk.files.append(entry)
 
     if not pdk.models:
@@ -318,6 +341,28 @@ def probe(model_file, model_name, kind='nmos', length=None, width=10e-6,
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from analog_spice import Circuit, u_V, operating_point, _spice_path
 
+    text = _read(Path(model_file).expanduser())
+    if text and _SPECTRE_LANG_RE.search(text):
+        try:
+            import cadence
+            if cadence.environment().has('spectre'):
+                r = cadence.spectre_probe(
+                    str(Path(model_file).expanduser()), model_name,
+                    section=section or 'tt', polarity='n' if kind == 'nmos' else 'p',
+                    w=width, l=length or 0.18e-6, vgs=vgs if vgs is not None else vdd * 0.7,
+                    vds=vdd)
+                r.pop('result', None)
+                r.setdefault('model', model_name)
+                r['simulator'] = 'spectre'
+                return r
+        except Exception as exc:   # fall through to the clear refusal below
+            note = f' (Spectre attempt failed: {exc})'
+        else:
+            note = ''
+        return {'ok': False, 'model': model_name,
+                'error': f'{model_file} is Spectre-dialect (simulator lang=spectre); '
+                         'ngspice cannot read it and no Spectre was found. Probe it '
+                         'with Spectre, or point probe() at a SPICE-dialect card.' + note}
     length = length or 0.18e-6
     vgs = vdd * 0.7 if vgs is None else vgs
     c = Circuit('pdk_probe')
