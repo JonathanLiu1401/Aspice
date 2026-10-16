@@ -571,12 +571,19 @@ _COMPLETE_RE = re.compile(
     r'spectre completes with (\d+) errors?, (\d+) warnings?, and (\d+) notices?')
 
 
+# Spectre 23.1 indents its messages ("    ERROR (SFE-868): ...") under a
+# "Error found by spectre ..." header; older versions start them at column 0.
+# A message runs on until a blank line, the next message or the next header.
+_LOG_CONT = (r'[^\n]*(?:\n(?![ \t]*(?:[A-Z]{4,}|$)|(?:Error|Warning|Notice|Info) '
+             r'(?:found|from))[^\n]*)*')
+
+
 def parse_spectre_log(text):
     """Errors, warnings and the completion line from a spectre log/spectre.out."""
     errors = [m.group(0).strip() for m in
-              re.finditer(r'^ERROR[^\n]*(?:\n(?![A-Z]{4,}|\s*$)[^\n]*)*', text, re.M)]
+              re.finditer(r'^[ \t]*ERROR' + _LOG_CONT, text, re.M)]
     warnings = [m.group(0).strip() for m in
-                re.finditer(r'^WARNING[^\n]*(?:\n(?![A-Z]{4,}|\s*$)[^\n]*)*', text, re.M)]
+                re.finditer(r'^[ \t]*WARNING' + _LOG_CONT, text, re.M)]
     m = _COMPLETE_RE.search(text)
     fatal = 'terminated prematurely' in text or 'Fatal error' in text
     return {

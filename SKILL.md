@@ -1,6 +1,6 @@
 ---
 name: aspice
-description: "Use when solving, simulating, or checking analog CMOS circuits - MOSFET biasing and saturation, gm/ID sizing, CS/cascode/source-follower/diff-pair/current-mirror analysis, op-amp gain, phase margin, frequency response, noise, Razavi exercises - when reading, debugging, tuning or re-exporting a Cadence ADE / Spectre netlist (.scs), and when operating Cadence: Virtuoso (headless or a live session via virtuoso-bridge / CIW / SKILL), schematic, symbol or layout editing and readback, netlisting, Spectre with a real PDK (gpdk045, FreePDK45, sky130), ADE Maestro setup and PSF results, GDS stream, DRC/LVS with Calibre or PVS."
+description: "Use when solving, simulating, or checking analog CMOS circuits - MOSFET biasing and saturation, gm/ID sizing, CS/cascode/source-follower/diff-pair/current-mirror analysis, op-amp gain, phase margin, frequency response, noise, Razavi exercises - when reading, debugging, tuning or re-exporting a Cadence ADE / Spectre netlist (.scs), when simulating remotely on a lab Linux host over ssh (including from Windows), and when operating Cadence: Virtuoso (headless or a live session via virtuoso-bridge / CIW / SKILL), schematic, symbol or layout editing and readback, netlisting, Spectre with a real PDK (gpdk045, FreePDK45, sky130), ADE Maestro setup and PSF results, GDS stream, DRC/LVS with Calibre or PVS."
 ---
 
 # aspice - analog design, Spectre netlists, and Cadence Virtuoso
@@ -25,6 +25,7 @@ One skill for analog work from hand analysis to a live Virtuoso session.
 | An ADE / Spectre `.scs` netlist to read, edit, tune, re-export | `spectre_netlist`, `netlist_digest`, `spectre_to_ngspice` | Part 2 |
 | Cadence on this machine, **no GUI needed** (read/check/netlist/simulate a cell, PSF, DRC/LVS) | `cadence as CD` - batch `virtuoso -nograph`, OCEAN, Spectre, Calibre | Part 3 |
 | A **running Virtuoso** the user is looking at: draw/edit schematics, symbols, layout, set up ADE Maestro, CIW | `virtuoso-bridge` (SKILL daemon in that CIW) | Part 4 |
+| **From another computer (Windows, laptop)**: simulate a netlist on a lab host with the real PDKs | `scripts/lab_run.py` (needs only Python + OpenSSH on the client) | `references/remote-lab-spectre.md` |
 | Standalone Spectre netlist runs through the bridge, parallel sim jobs | the `spectre` skill | - |
 | PDK scan, gm/ID charts, exporting a design to another Cadence machine | `pdk`, `plots`, `netlist_export` | `references/pdk-charts-export.md` |
 
@@ -75,7 +76,11 @@ NFS stalls (Virtuoso starts of 15-60 min, processes stuck in D state).
 5. Many sims (corners, sweeps): one detached Python script per host that loops
    `CD.run_spectre` / `CD.simulate_cell` serially over `section=` values on the
    local copy. Do not fan out dozens of parallel Spectre jobs onto NFS.
-6. Never `kill -9` a Cadence process in D state, and never `pkill -f PATTERN`
+6. From a machine without Cadence (Windows laptop), or for one accurate run:
+   `python scripts/lab_run.py run deck.scs --accuracy high --verify` does steps
+   1-4 for you and checks the answer against 10x tighter tolerances.
+   Setup, PDK include lines, accuracy levels: `references/remote-lab-spectre.md`.
+7. Never `kill -9` a Cadence process in D state, and never `pkill -f PATTERN`
    from a command line that contains PATTERN (it kills its own shell). Kill by PID.
 
 ---
@@ -340,6 +345,7 @@ with `build_schematic` and simulating it in Spectre.
 ## References
 
 - `references/pdk-charts-export.md` - PDK scan/probe, gm/ID and other design charts, netlist export package
+- `references/remote-lab-spectre.md` - simulating on a lab host from Windows or any other computer; PDK include lines; accuracy levels
 - `references/cadence-headless.md` - how the headless backend works, and the tool behaviours it works around
 - `references/virtuoso/` - virtuoso-bridge API and live-session references (symlink into `~/src/virtuoso-bridge-lite`)
 - `references/ade-netlist-errors.md` - Spectre failure catalogue; `references/spectre-syntax.md` - syntax table
