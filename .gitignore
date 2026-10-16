@@ -7,9 +7,6 @@ __pycache__/
 .venv/
 venv/
 
-# Visible-agent run logs
-.claude-codex/
-
 # ngspice writes this next to the working dir when it checks a BSIM3 card
 b3v3_1check.log
 

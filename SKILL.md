@@ -1,70 +1,86 @@
 ---
 name: aspice
-description: Use when solving, simulating, or checking analog CMOS integrated-circuit work - MOSFET biasing, saturation and overdrive checks, gm/ID sizing, common-source/cascode/source-follower/differential-pair/current-mirror analysis, op-amp gain and phase margin, frequency response and Miller effect, thermal and flicker noise, feedback and stability, Razavi "Design of Analog CMOS Integrated Circuits" exercises - and when reading, debugging, simulating, tuning, or re-exporting a Cadence ADE / Spectre netlist (.scs), including any large netlist that must be summarised before it can be reasoned about - and, on a machine with Cadence, when driving Virtuoso / Spectre / Calibre headlessly: reading or checking schematics and layouts, netlisting a cell, simulating with the real PDK (gpdk045, FreePDK45), reading ADE/Maestro PSF results, editing a design and re-verifying it, or running DRC/LVS.
+description: "Use when solving, simulating, or checking analog CMOS circuits - MOSFET biasing and saturation, gm/ID sizing, CS/cascode/source-follower/diff-pair/current-mirror analysis, op-amp gain, phase margin, frequency response, noise, Razavi exercises - when reading, debugging, tuning or re-exporting a Cadence ADE / Spectre netlist (.scs), and when operating Cadence: Virtuoso (headless or a live session via virtuoso-bridge / CIW / SKILL), schematic, symbol or layout editing and readback, netlisting, Spectre with a real PDK (gpdk045, FreePDK45, sky130), ADE Maestro setup and PSF results, GDS stream, DRC/LVS with Calibre or PVS."
 ---
 
-# aspice - agentic SPICE for analog design
+# aspice - analog design, Spectre netlists, and Cadence Virtuoso
 
 ## Overview
 
-Three jobs, one toolkit.
+One skill for analog work from hand analysis to a live Virtuoso session.
 
-**Analog design and analysis.** Textbook answers go wrong in two places: a
-device silently sitting in triode instead of saturation, and a hand formula
-never checked against a simulator. Every answer here is produced twice - once
-by hand from the small-signal model, once by simulation - and reconciled in a
-printed table. A number that exists only one way is not an answer yet.
+- **Never trust a number that exists only one way.** Every design answer is
+  produced by hand from the small-signal model *and* by simulation, then
+  reconciled in a printed table. Most errors are a device silently in triode.
+- **Never read a netlist raw.** Parse it and read a digest (Part 2).
+- **Never write the user's library or `~/simulation` unless asked.** Work on
+  scratch copies. A request naming a library ("draw X in my lib Y") is
+  permission to add that cell there, never to overwrite or delete an existing one.
 
-**Cadence ADE / Spectre netlists.** A real ADE netlist is tens of thousands of
-lines and must never be read raw. Parse it, read a compact digest, and pull
-raw fragments only where detail is actually needed.
+## Pick the backend
 
-**Cadence itself, headlessly (Part 4).** When Spectre / Virtuoso / Calibre are
-on this machine, everything runs here: read and schCheck schematics, build or
-edit a cell (on a scratch copy), netlist it, simulate it in Spectre against the
-real PDK, read ADE results, stream layout out and run DRC/LVS. No copying files
-to another machine.
+| Situation | Use | Where |
+|---|---|---|
+| Hand formula check, textbook exercise, exploratory sweep, no Cadence | ngspice + PTM via `analog_spice` | Part 1 |
+| An ADE / Spectre `.scs` netlist to read, edit, tune, re-export | `spectre_netlist`, `netlist_digest`, `spectre_to_ngspice` | Part 2 |
+| Cadence on this machine, **no GUI needed** (read/check/netlist/simulate a cell, PSF, DRC/LVS) | `cadence as CD` - batch `virtuoso -nograph`, OCEAN, Spectre, Calibre | Part 3 |
+| A **running Virtuoso** the user is looking at: draw/edit schematics, symbols, layout, set up ADE Maestro, CIW | `virtuoso-bridge` (SKILL daemon in that CIW) | Part 4 |
+| Standalone Spectre netlist runs through the bridge, parallel sim jobs | the `spectre` skill | - |
+| PDK scan, gm/ID charts, exporting a design to another Cadence machine | `pdk`, `plots`, `netlist_export` | `references/pdk-charts-export.md` |
 
 **Which simulator answers which question.** If `CD.environment().has('spectre')`,
-any number that is a prediction for a real design (bias, gain, swing, margins)
-comes from **Spectre + the real PDK**. ngspice + PTM is for verifying hand
-formulas, fast exploratory sweeps, and machines without Cadence. Never present a
-PTM number as a gpdk045 prediction: measured at the same W/L/bias, PTM-45nm-HP
-passes 3-60x the gpdk045 current at L=45n and 0.7-1.5x at L=180n-1u, and no PTM
-card tracks gpdk045 across L. The simulators themselves agree: the same BSIM4
-card in Spectre and in ngspice gives node voltages within 0.05%.
+any number presented as a prediction for a real design comes from **Spectre +
+the real PDK**. ngspice + PTM verifies hand formulas and runs on machines
+without Cadence. Never present a PTM number as a gpdk045 prediction: at the same
+W/L/bias PTM-45nm-HP passes 3-60x the gpdk045 current at L=45n and 0.7-1.5x at
+L=180n-1u. The simulators agree with each other (same BSIM4 card: within 0.05%);
+the models do not. A generic or textbook question with no PDK named stays on
+ngspice + PTM, labelled as such.
 
 ## Setup
 
 | Thing | Where |
 |---|---|
-| Python + PySpice + ngspice | the venv interpreter that has PySpice (here: `~/.claude/skills-venv/bin/python`; ngspice 47 at `~/opt/ngspice`) |
-| Libraries | `<skill>/lib/` |
-| Technology models | `<skill>/models/` - if empty, run `scripts/fetch_models.py` |
-| Cadence (optional) | found automatically: `CD.doctor()` lists tools, licenses, projects, the `cds.lib` in use. Projects here: **EE332** (gpdk045, `~/EE332/cadence`) and **EE476** (FreePDK45 + Nangate, `~/EE476/cadence`, `PDK_DIR` set). Selected by `$ASPICE_PROJECT`, else the project whose directory is the cwd, else the active one (`CD.use_project('EE476')`); a single call can pass `cds_lib=`. Register more with `CD.add_project(name, cds_lib, env={...})` |
-| Verifiers | `scripts/analog_selftest.py`, `test_parser.py`, `test_digest.py`, `test_integration.py`, `test_translate.py`, `test_export.py`, `test_pdk_plots.py`, `test_cadence.py`; end to end on your data: `cadence_loop.py` |
-
-Always use that interpreter; PySpice is not on the system Python. If anything
-looks broken, run `scripts/analog_selftest.py` - it checks 13 groups of results
-against closed-form answers and prints exactly what failed.
+| Python for aspice | `~/.claude/skills-venv/bin/python` (PySpice; ngspice 47 at `~/opt/ngspice`). PySpice is not on the system Python |
+| Python for the bridge | `~/EMiT/virtuoso-mcp-eval/.venv/bin/{python,virtuoso-bridge}` (imports the checkout in `~/EMiT/virtuoso-mcp-eval/tools/virtuoso-bridge-lite`; the bridge docs in `references/virtuoso/` track the newer `~/src/virtuoso-bridge-lite`, so when they disagree the installed package wins: `inspect.signature` it) |
+| Libraries | `<skill>/lib/`; models in `<skill>/models/` (empty -> `scripts/fetch_models.py`) |
+| Cadence projects | `print(CD.doctor())`. **EE332** gpdk045 `~/EE332/cadence`; **EE476** FreePDK45 `~/EE476/cadence` (`PDK_DIR` carried by the project); **EMiT** multi-PDK `~/EMiT/cadence` (launch GUI: `~/EMiT/cadence/start_virtuoso.sh`). Select with `$ASPICE_PROJECT`, `CD.use_project(name)`, or `cds_lib=` per call. Pin it - an auto-picked cds.lib once switched projects mid-session |
+| Broken? | `scripts/analog_selftest.py` checks 13 groups against closed-form answers |
 
 ```python
-import sys; sys.path.insert(0, '<skill>/lib')   # here: ~/.claude/skills/aspice/lib
-from analog_spice import *              # analog design
+import sys; sys.path.insert(0, '/homes/jliu1401/.claude/skills/aspice/lib')
+from analog_spice import *              # analog design (import instead of PySpice: it patches two bugs)
 import spectre_netlist as SN            # ADE netlist parse / edit / write
 import netlist_digest as ND             # compact views of a big netlist
 import spectre_to_ngspice as TR         # translate, simulate, tune, re-export
-import netlist_export as NX             # describe a circuit, export it to Cadence
-import pdk, plots                       # read a PDK; draw design charts
-import cadence as CD                    # Spectre, Virtuoso, OCEAN, Calibre, headless
+import netlist_export as NX, pdk, plots # export, PDK reading, design charts
+import cadence as CD                    # headless Spectre, Virtuoso, OCEAN, Calibre
 ```
 
-Import `analog_spice` **instead of** importing PySpice directly - it repairs
-two PySpice/ngspice incompatibilities at import time.
+## Running Cadence on the UW ECE lab machines
+
+The lab hosts share one NFS home, and heavy Cadence I/O has tipped hosts into
+NFS stalls (Virtuoso starts of 15-60 min, processes stuck in D state).
+
+1. Pick a fast idle host yourself (no need to ask): time 20x `touch`+`stat`
+   on candidates (`ssh linux-lab-1NN.ece.uw.edu`, BatchMode works; 136, 137,
+   143, 144, 145 have been clean). Healthy is ~0.1 s total; a sick host takes
+   seconds and must not run Cadence. Check `uptime`/`who` for idleness.
+2. ssh shells lack the Cadence PATH: `source ~/EMiT/virtuoso-mcp-eval/bin/cadence_env.sh`
+   first (it also puts Cadence `pvs` ahead of `/sbin/pvs`).
+3. Simulate and run DRC/LVS on **local copies** (`/var/tmp/...`), not on
+   NFS-hosted libraries; copy results back once.
+4. Launch anything long fully detached: `(setsid nohup CMD > log 2>&1 < /dev/null &)`.
+   Children of the agent shell die when the session moves hosts.
+5. Many sims (corners, sweeps): one detached Python script per host that loops
+   `CD.run_spectre` / `CD.simulate_cell` serially over `section=` values on the
+   local copy. Do not fan out dozens of parallel Spectre jobs onto NFS.
+6. Never `kill -9` a Cadence process in D state, and never `pkill -f PATTERN`
+   from a command line that contains PATTERN (it kills its own shell). Kill by PID.
 
 ---
 
-# Part 1: analog design
+# Part 1: analog design (ngspice)
 
 ## Workflow
 
@@ -202,93 +218,13 @@ and fixes. `references/spectre-syntax.md` is the syntax lookup table.
 
 ---
 
-# Part 3: your PDK, design charts, and export
+# Part 3: Cadence on this machine, headless
 
-## Point it at a PDK you have
-
-Cadence GPDK kits (gpdk045 and friends) are **proprietary and licensed**, not
-open source, so nothing here downloads a PDK. `pdk.scan` reads a directory you
-supply, on a machine where you are licensed to have it. Open PDKs work
-identically: FreePDK45 (Apache 2.0, the closest open analogue to gpdk045),
-sky130, GF180MCU, IHP SG13G2 - `pdk.OPEN_PDKS` lists them with links.
-
-```python
-import pdk
-p = pdk.scan('/path/to/pdk')     # or a single model file
-print(p.summary())               # files, corners, devices, model families
-p.corners()                      # ['tt', 'ss', 'ff', ...]
-p.device_names()                 # {'nmos': [...], 'pmos': [...]}
-pdk.probe(model_file, 'nch', length=45e-9)   # does it actually bias?
-p.techmap_skeleton()             # a techmap draft to check against the PDK
-```
-
-`probe` matters more than `scan`: reading a card proves it exists, running it
-proves it works. It reports region, Vth, gm, ro, gm/ID and whether the model
-carries capacitances.
-
-## Design charts
-
-Every chart runs the simulator against your PDK and writes a PNG (headless, so
-it works over SSH).
-
-| Chart | Call | What it answers |
-|---|---|---|
-| Id-Vds family | `plots.iv_family(models, 'nch', w=, l=)` | where saturation starts, how flat it is |
-| Id and gm vs Vgs | `plots.transfer(...)` | threshold, subthreshold slope, peak gm |
-| **gm/ID design chart** | `plots.gm_id_chart(models, 'nch', lengths=[...])` | **how to size a device without guessing** |
-| Bode with PM | `plots.bode(freq, data['out'])` | gain, f_3dB, UGB, phase margin |
-| Transient | `plots.transient(t, {'out': v})` | step response, slewing |
-| Any sweep | `plots.sweep_metric(build, values, measure, target=)` | the exact value that hits a target |
-
-`gm_id_chart` is the one to reach for when sizing. gm/ID is exactly independent
-of W (measured here: 0.001 1/V across an 8x width change) and nearly independent
-of L, so you pick an operating point from the curve - high gm/ID for efficiency
-and gain, low for speed - read off ID/W, and the width follows from the current
-you need. No guess-and-iterate.
-
-`sweep_metric` refines its target crossing by bisection rather than reading it
-off the polyline. On a steep width sweep, plain interpolation missed a 0.9 V
-target by 110 mV; the refined value lands within 10 uV. `target_crossing_error`
-reports what was actually achieved.
-
-## Generate a netlist and export it
-
-For the case where the design happens here and Cadence lives on another machine.
-Describe the circuit once; render it for both.
-
-```python
-from netlist_export import Design, Techmap, export_package
-
-d = Design(name='ota_5t', techmap=Techmap.load('techmap.json'))
-s = d.subckt('ota_5t', ['VDD', 'VSS', 'VINP', 'VINN', 'VBIAS', 'VOUT'])
-s.device('M1', 'nmos', ['DIODE', 'VINP', 'TAIL', 'TAIL'], l='1u', w_f='2u', n_f=2)
-...
-export_package(d, 'out/ota_5t', models=tech('180nm'))
-```
-
-That writes `.cdl` and `.scs` carrying the PDK's cell and CDF parameter names
-for the Cadence machine, `.sp` carrying SPICE names so it simulates here, plus
-`techmap.json`, a `manifest.json` recording structural warnings, and a README.
-`d.check()` catches floating nets, duplicate instance names and missing sizing
-before the transfer rather than after.
-
-**The trap this exists to avoid.** A Cadence netlist carries CDF parameter names
-(`fw`, `fingers`, `w`); SPICE knows only `w`, `l`, `m`. Feeding a CDL straight to
-ngspice fails with `unknown parameter (fw)`. Worse, a PDK's `w` is a finger width
-in one process and a total width in another, and nothing warns you. So `w_f` is
-always the finger width here, `n_f` the count, SPICE gets `w=w_f` and `m=n_f`,
-and a PDK total-width parameter is computed rather than assumed.
-
----
-
-# Part 4: Cadence on this machine, headless
-
-All of it runs in scratch directories (`ASPICE_WORKDIR`). User libraries are
-opened read-only; anything that must write (schCheck, edits, builds, stream-in)
-works on a copy in the scratch library `aspice_scratch`. OCEAN's project dir is
-redirected (left alone it writes `~/simulation/<cell>`). `edit_instance_params`
-refuses a user library unless `allow_write=True` - only pass that when the user
-explicitly asks to change their design.
+Every call runs in its own scratch workdir (`ASPICE_WORKDIR`) with a `cds.lib`
+that INCLUDEs the user's. Cellviews open read-only; schCheck, edits, builds and
+stream-in act on a copy in `aspice_scratch`. OCEAN's project dir is redirected
+away from `~/simulation`. `edit_instance_params` refuses a user library unless
+`allow_write=True` - pass that only when the user asks to change their design.
 
 | Task | Call |
 |---|---|
@@ -318,6 +254,66 @@ the design: copy, edit, re-simulate, compare; touch the user's library only on
 explicit request. `references/cadence-headless.md` has the tool behaviours this
 depends on (OCEAN, PSF XL, `$PDK_DIR`, layer maps, SKILL pitfalls).
 
+---
+
+# Part 4: a live Virtuoso session (virtuoso-bridge)
+
+Use when the user has Virtuoso open and wants to see the result there, or the
+operation needs the GUI (Maestro setup, drawn schematics, window captures).
+Python runs on the client; SKILL runs inside the selected Virtuoso process.
+
+**Connect.** `virtuoso-bridge status`; then a harmless `virtuoso-bridge eval '1+2'`.
+If the daemon is not loaded, give the user the exact `load("...")` line to paste
+into the CIW. First connection or a changed target: `references/virtuoso/connection.md`.
+
+**Smallest interface first.** One-off SKILL: `virtuoso-bridge eval 'EXPR'`,
+`eval --stdin`, `load FILE.il`. Structured: `client.schematic`, `.symbol`,
+`.layout`, `.library`, `.maestro`. Anything else: `client.execute_skill(...)`.
+Raw SKILL is a supported escape hatch, not a failure.
+
+**Rules that have cost hours when skipped:**
+
+- **Modal dialogs freeze the SKILL socket.** Stream-out completion, "Save
+  Changes?", license prompts: every later call hangs (in the EMiT bench, until
+  the 1800 s MCP timeout, 60-150 min lost per trial). Prefer non-interactive
+  forms of the call, and before popup-prone operations or any timeout recovery
+  read `references/virtuoso/shared-ciw-dialogs.md`. Leave unknown dialogs to the
+  user; never press Enter/Cancel blindly, never resubmit or restart the daemon
+  to unblock a wait. To see what is blocking, capture the screen over
+  SSH/X11 (`troubleshooting.md`) and show the user.
+- **Verify before calling.** Check SKILL signatures against the installed
+  Cadence docs (`references/virtuoso/local-docs.md`) and read real cell pins and
+  CDF parameters before placing. `nf` vs `fingers` vs `w` are PDK-specific.
+- **`create()` only for a new cell; `modify()` for an existing one.** Creation is
+  not permission to delete a cell first. Read back connectivity and parameters,
+  check and save, then netlist. For PDK devices run the CDF callbacks.
+- **Simulate the saved schematic,** never a hand-written netlist standing in for
+  it. For GUI-equivalent results keep the netlist, models, corner and options.
+- **Drawn schematics read like a hand drawing.** Wire with entry method
+  `"draw"` (the default of `schematic_create_wire_between_instance_terms`; the
+  lower-level wire helpers default to `"route"`, so pass `route_style="draw"`), never
+  the autorouter. NMOS source down, PMOS source up, gates from the
+  left, sources upright (`vdc` R0). No crossings between nets. After saving,
+  render a PNG (`capture_schematic_cell`) and look at it.
+
+| Operation | Reference (`references/virtuoso/`) |
+|---|---|
+| CLI/Python calls, file transfer, CIW output | `client-basics.md` |
+| Schematic edit, readback, CDF callbacks | `schematic-python-api.md`, `schematic-skill-api.md` |
+| Recreate / import a schematic | `schematic-recreation.md`, `schematic-manifest-import.md` |
+| Symbols | `symbol-python-api.md` |
+| Layout, vias, GDS | `layout-python-api.md`, `layout-skill-api.md` |
+| Libraries, tech binding | `library-python-api.md` |
+| Maestro setup, runs, results | `maestro-python-api.md`, `maestro-skill-api.md`, `simulation-flow.md` |
+| Netlisting without Maestro | `netlist.md`, `batch-netlist-si.md` |
+| Cellview files, locks | `cellview-on-disk-layout.md` |
+| SOS, SKILL Finder | `sos-python-api.md`, `skill-finder-python-api.md` |
+| Errors, stalls, connection | `troubleshooting.md` |
+
+Read only the branch you need. Repository examples: `rg --files ~/src/virtuoso-bridge-lite/examples/01_virtuoso`.
+
+---
+
 ## Verification
 
 Offline (no Cadence): `python scripts/offline_loop.py` plus the eight suites
@@ -343,10 +339,9 @@ with `build_schematic` and simulating it in Spectre.
 
 ## References
 
-- `references/pyspice-cookbook.md` - API recipes and the PySpice bugs patched here
-- `references/razavi-map.md` - chapter-to-simulation map with the key formulas
-- `references/ade-netlist-errors.md` - Spectre failure catalogue
-- `references/spectre-syntax.md` - Spectre syntax reference
-- `references/cadence-headless.md` - how the headless Cadence backend works, and the tool behaviours it works around
-- `examples/` - runnable, verified scripts
-- `corpus/` - 19 realistic ADE netlists with ground-truth JSON
+- `references/pdk-charts-export.md` - PDK scan/probe, gm/ID and other design charts, netlist export package
+- `references/cadence-headless.md` - how the headless backend works, and the tool behaviours it works around
+- `references/virtuoso/` - virtuoso-bridge API and live-session references (symlink into `~/src/virtuoso-bridge-lite`)
+- `references/ade-netlist-errors.md` - Spectre failure catalogue; `references/spectre-syntax.md` - syntax table
+- `references/pyspice-cookbook.md` - PySpice recipes and patched bugs; `references/razavi-map.md` - chapter map
+- `examples/` - runnable verified scripts; `corpus/` - 19 ADE netlists with ground truth
