@@ -294,12 +294,34 @@ Raw SKILL is a supported escape hatch, not a failure.
   check and save, then netlist. For PDK devices run the CDF callbacks.
 - **Simulate the saved schematic,** never a hand-written netlist standing in for
   it. For GUI-equivalent results keep the netlist, models, corner and options.
-- **Drawn schematics read like a hand drawing.** Wire with entry method
-  `"draw"` (the default of `schematic_create_wire_between_instance_terms`; the
-  lower-level wire helpers default to `"route"`, so pass `route_style="draw"`), never
-  the autorouter. NMOS source down, PMOS source up, gates from the
-  left, sources upright (`vdc` R0). No crossings between nets. After saving,
-  render a PNG (`capture_schematic_cell`) and look at it.
+- **Drawn schematics read like a hand drawing.** A human must be able to follow
+  every net by eye. Basic schematic practice, which overrides the label-only
+  examples in `references/virtuoso/` (`add_net_label_to_transistor`,
+  `schematic_label_instance_term`, "No wires" in `schematic-recreation.md`):
+  - **Wires, not labels.** Join terminals with real wires:
+    `schematic_create_wire_between_instance_terms` (entry method `"draw"`; the
+    lower-level wire helpers default to `"route"`, so pass `route_style="draw"`),
+    never the autorouter. A wire stub with a net label on its end is not a
+    connection a reviewer can see; inside a block it is a defect.
+  - **Labels only where a wire would hurt:** a net used in many places (supplies,
+    clock, bias, a control bus fanning out), a connection that would otherwise
+    cross other wires, or a net that leaves the sheet (pins). Everything else is
+    drawn.
+  - **Place for short wires.** Put connected devices next to each other in
+    signal-flow order: inputs left, outputs right, VDD at the top, VSS at the
+    bottom; NMOS source down, PMOS source up, gates from the left, sources
+    upright (`vdc` R0); mirrored halves of a differential circuit mirrored on the
+    sheet. Plan the placement before wiring so each wire is a short straight run
+    or one bend, not a trip across the sheet.
+  - **No crossings.** Minimise wire crossings; if two nets must cross, replace one
+    of them by a label pair instead. A dot (T-junction) means connected; never
+    run a wire across a terminal it does not connect to.
+  - **Hierarchy keeps it readable.** Repeated or large structures (logic gates,
+    DAC bits, flip-flops) go into their own cells with symbols, so each sheet
+    stays small enough to wire by hand.
+  - **Check before finishing.** Render a PNG (`capture_schematic_cell`) and look
+    at it, and count: in a block, labels should be a small fraction of wire
+    pieces. One label per wire means it was built from stubs; redo it.
 
 | Operation | Reference (`references/virtuoso/`) |
 |---|---|
