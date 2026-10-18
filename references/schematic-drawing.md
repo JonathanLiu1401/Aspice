@@ -40,6 +40,26 @@ that produces a correct netlist nobody can read, and it is the failure this guid
 6. **Hierarchy keeps sheets small.** Repeated structures (gates, DAC bits, flip-flops) become their own cells with
    symbols; each sheet should be small enough to wire by hand.
 
+## Worked pattern (it works: small test benches drawn this way read like a textbook figure)
+
+```python
+# 1. read each master's pin centres once (at R0) and keep them as constants
+#    e.g. by SKILL: foreach(t master~>terminals printf("%s %L\n" t~>name centerBox(car(t~>pins)~>fig~>bBox)))
+MOS = {"D": (dx_d, dy_d), "G": (dx_g, dy_g), "S": (dx_s, dy_s), "B": (dx_b, dy_b)}   # read, never guessed
+VDC = {"PLUS": (..), "MINUS": (..)}
+# 2. place every part relative to the terminal it connects to, so the wire is straight:
+#    device at (x0, y0); its drain at (x0+dx_d, y0+dy_d); the supply source directly above that drain,
+#    upright (PLUS on top); the input pin level with the gate; ground symbol directly below the source
+# 3. one explicit wire per connection, named terminal to terminal
+sch.add(wire("VDS", "PLUS", "M0", "D"))       # schematic_create_wire_between_instance_terms, "draw"
+sch.add(wire("VDS", "MINUS", "G1", "gnd!"))
+sch.add(wire("PIN0", "ipin", "M0", "G"))
+# 4. check, render, look: sources lying on their side, wires doubling back, labels where a wire fits -> fix, rebuild
+```
+
+For a larger block, do the same column by column: place the device at the top of a branch, then each device below
+it so the shared terminal lines up vertically, then the next branch beside it.
+
 ## Done means checked
 
 A block is finished only when all three hold:
