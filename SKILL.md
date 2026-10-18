@@ -31,7 +31,9 @@ uses net labels, including the ones in `references/virtuoso/`.
   bias nets used in many places, on a net that would otherwise cross other wires, and on pins.
 - **Hierarchy keeps hand drawing cheap.** Before drawing, split the design into small cells, each with a symbol
   and at most about 12 devices on its sheet: inverter, NAND/NOR, transmission gate, latch, cap driver, unit DAC
-  bit. Draw each small cell once. Then draw the larger sheets from those symbols, again joined by wires.
+  bit. Draw each small cell once. Then draw the larger sheets from those symbols, again joined by wires. Keep
+  sheets roughly 2:1 or squarer (wrap long chains into rows). Test benches follow the same rule: each source sits
+  next to the DUT pin it drives, wired to it.
 - **You place and wire every sheet yourself.** Write the code for each sheet by hand: chosen coordinates and one
   explicit wire per connection, using `lib/schdraw.il` (`aspPlace` puts a part so a chosen terminal lands on a
   point, `aspWire` joins two terminals) or the bridge's `schematic_create_wire_between_instance_terms`. A loop

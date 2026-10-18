@@ -42,7 +42,14 @@ that produces a correct netlist nobody can read, and it is the failure this guid
    another net's terminal, connects them (a short). Overlapping collinear wires of two nets merge them. Plain
    crossings without a dot do not connect, but count them and keep them rare. When a clean path does not exist,
    use a label pair for that one connection.
-6. **Hierarchy keeps sheets small.** Repeated structures (gates, DAC bits, flip-flops) become their own cells with
+6. **Sheet shape and spacing.** Keep each sheet roughly 2:1 or squarer: wrap a long chain (bit cells, a delay
+   line) into two or more rows instead of one strip. Leave at least one symbol width between columns and a clear
+   gap between stacked symbols, so parameter text does not overlap and one symbol's supply stub never touches the
+   next one's.
+7. **Test benches too.** Put each source next to the DUT pin it drives and wire it there (the source upright,
+   PLUS toward the pin, a ground symbol directly under MINUS); put load caps next to the output pins they load.
+   A row of sources along the top, joined to the DUT only through labels, fails like any other labelled sheet.
+8. **Hierarchy keeps sheets small.** Repeated structures (gates, DAC bits, flip-flops) become their own cells with
    symbols; each sheet should be small enough to wire by hand.
 
 ## Worked pattern in SKILL (a CMOS inverter; any PDK)
