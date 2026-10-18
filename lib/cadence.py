@@ -1250,6 +1250,10 @@ def build_schematic(cell, devices, pins=(), lib=SCRATCH_LIB, workdir=None, cds_l
 
     This replaces the export -> copy -> spiceIn round trip when Virtuoso is
     on the same machine: the circuit is built, checked and netlisted here.
+
+    The result is a netlist drawn as a picture (labels on every pin). Use it only
+    for throwaway netlist tests; never for a cell a person will review. Draw those
+    by hand with lib/schdraw.il (see SKILL.md, hard rule on schematics).
     """
     wd = make_workdir('aspice_build_', workdir)
     code = [_BUILD_SKILL,

@@ -16,6 +16,8 @@ that produces a correct netlist nobody can read, and it is the failure this guid
 
 ## Method, per block
 
+0. **Split into small cells first.** Each sheet holds at most about 12 devices. Gates, transmission gates,
+   latches, drivers and unit bits become their own cells with symbols; larger sheets place those symbols.
 1. **Plan on paper first.** Identify the branches from VDD to VSS: devices in series (one's drain or source is
    the next one's source or drain) form a vertical column, top to bottom. A differential circuit has two mirrored
    halves: draw them as mirror images about a centre line, gates facing the centre or the inputs. Devices that
@@ -30,7 +32,10 @@ that produces a correct netlist nobody can read, and it is the failure this guid
    grid, with room between columns for gate wires (about one symbol width). Shift a device so the terminal it
    shares with the device above lines up vertically: then the stack wire is one straight segment. Mirror a device
    (`MY`) when its gate should face the other way.
-4. **Wire terminal to terminal.** Use `schematic_create_wire_between_instance_terms` (entry method `"draw"`), or
+   `lib/schdraw.il` does the arithmetic: `aspPlace(cv lib cell name orient term xy)` puts the part so that `term`
+   lands exactly on `xy` (pin positions are read from the symbol, for any PDK).
+4. **Wire terminal to terminal.** Use `aspWire(cv instA "D" instB "S")` from `lib/schdraw.il` (straight when aligned,
+   else one bend), `schematic_create_wire_between_instance_terms` (entry method `"draw"`), or
    `schCreateWire(cv "draw" "full" points ...)` with points you computed from the terminal positions. Never the
    autorouter (`"route"`).
 5. **Avoid accidental connections.** A wire whose end or corner touches another net's wire, or that runs over
@@ -40,7 +45,20 @@ that produces a correct netlist nobody can read, and it is the failure this guid
 6. **Hierarchy keeps sheets small.** Repeated structures (gates, DAC bits, flip-flops) become their own cells with
    symbols; each sheet should be small enough to wire by hand.
 
-## Worked pattern (it works: small test benches drawn this way read like a textbook figure)
+## Worked pattern in SKILL (a CMOS inverter; any PDK)
+
+```
+load("<aspice>/lib/schdraw.il")
+cv = dbOpenCellViewByType(LIB "inv" "schematic" "schematic" "w")
+mp = aspPlace(cv PDK "pmos1v" "MP" "R0" nil list(0 1))                 ; top of the column
+d  = aspTermXY(mp "D")
+mn = aspPlace(cv PDK "nmos1v" "MN" "R0" "D" list(car(d) cadr(d) - 0.5)) ; its drain 0.5 below MP's drain
+aspWire(cv mp "D" mn "D")                                                ; one straight vertical wire
+aspWire(cv mp "G" mn "G")                                                ; gates joined on the left
+; input pin level with the gate wire, output pin level with the drain wire, VDD/VSS labels on the sources
+```
+
+## Worked pattern in Python (it works: small test benches drawn this way read like a textbook figure)
 
 ```python
 # 1. read each master's pin centres once (at R0) and keep them as constants
@@ -74,4 +92,6 @@ A block is finished only when all three hold:
    `allow_nets` lists the nets you labelled on purpose (supplies, clock, buses). FAIL means too many labels or
    labelled stubs: redo the placement and wiring, do not just relabel.
 3. You rendered the schematic to a PNG (`capture_schematic_cell`, or an export of the open window) and looked at
-   it: every net can be followed by eye, nothing overlaps, crossings are rare.
+   it: every net can be followed by eye, nothing overlaps, crossings are rare. **If the picture is a grid or row
+   of devices with a short labelled stub on every pin, it fails, even when schCheck is clean and the simulation
+   passes. Redraw it.** Do not move on to the next block, or to simulation, with a sheet that looks like that.

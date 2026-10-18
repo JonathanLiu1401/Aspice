@@ -17,6 +17,33 @@ One skill for analog work from hand analysis to a live Virtuoso session.
   scratch copies. A request naming a library ("draw X in my lib Y") is
   permission to add that cell there, never to overwrite or delete an existing one.
 
+## Any schematic you create must read like a hand drawing (hard rule)
+
+A person has to be able to review every schematic you save. This rule beats speed and beats any example that
+uses net labels, including the ones in `references/virtuoso/`.
+
+- **Fails:** devices set out in a grid or a row, each terminal ending in a short stub with a net-name label, so
+  connections exist only as matching label text. That is a netlist drawn as a picture. Every earlier benchmark
+  agent shipped exactly this, and it is not acceptable as a deliverable.
+- **Passes:** each sheet is drawn like a textbook figure. Series devices are stacked in columns from VDD down to
+  VSS, with the shared drain or source joined by one straight wire. Differential halves mirror each other.
+  Devices that share a gate sit side by side. Signals flow left to right. Labels appear only on supplies, clock or
+  bias nets used in many places, on a net that would otherwise cross other wires, and on pins.
+- **Hierarchy keeps hand drawing cheap.** Before drawing, split the design into small cells, each with a symbol
+  and at most about 12 devices on its sheet: inverter, NAND/NOR, transmission gate, latch, cap driver, unit DAC
+  bit. Draw each small cell once. Then draw the larger sheets from those symbols, again joined by wires.
+- **You place and wire every sheet yourself.** Write the code for each sheet by hand: chosen coordinates and one
+  explicit wire per connection, using `lib/schdraw.il` (`aspPlace` puts a part so a chosen terminal lands on a
+  point, `aspWire` joins two terminals) or the bridge's `schematic_create_wire_between_instance_terms`. A loop
+  is fine for a regular array, such as 8 identical DAC bits in a row, each wired to its neighbour. What is not
+  fine is a generic function that takes a device list or a `{terminal: net}` map and emits a sheet. If you
+  catch yourself writing one, stop: that function is the failure described above. `CD.build_schematic` is that
+  kind of function; it is only for throwaway netlist tests and never for a cell anyone will read.
+- **Done means looked at.** After each sheet: `schCheck` is clean; `lib/schlint.py` prints PASS; and you render
+  the sheet to a PNG and look at it. If it resembles the "Fails" picture (a grid of devices with a label on
+  every pin), redraw it before you go on. Simulating an unreadable schematic does not count as progress.
+  Details and a worked pattern: `references/schematic-drawing.md`.
+
 ## Pick the backend
 
 | Situation | Use | Where |
@@ -244,7 +271,7 @@ away from `~/simulation`. `edit_instance_params` refuses a user library unless
 | Results | `r.op()['vout']`, `r.wave('ac', 'vout')`, `r.devices()['NM0']['gm']`, `r.device_table()` |
 | Saturation check from Spectre | `print(r.device_table())` - region, gm/Id, gm*ro, Vds-Vdsat |
 | Edit a design and re-verify | `cl = CD.copy_cell(lib, cell)`; `CD.edit_instance_params(CD.SCRATCH_LIB, cell, {'M0': {'w': '2u'}}, cds_lib=cl)`; `CD.simulate_cell(CD.SCRATCH_LIB, cell, ..., cds_lib=cl)` |
-| Build a cell from a device list | `cl = CD.build_schematic(cell, [(name, lib, cell, params, {term: net}), ...], pins=[...])` |
+| Throwaway netlist test only (labels on every pin; never a cell anyone will read) | `cl = CD.build_schematic(cell, [(name, lib, cell, params, {term: net}), ...], pins=[...])` |
 | ADE/Maestro history | `CD.ade_runs()`; `CD.read_psf_dir(psf)`; transients in PSF XL: `CD.read_ade_waveform(psf, 'tran', ['VOUT'])` |
 | Real-PDK device data | `CD.spectre_probe(model_file, 'g45n1svt', w=, l=, vgs=, vds=, sweep_vgs=(0, 1, .01))`; `pdk.probe` routes here for Spectre-dialect kits |
 | Spectre vs ngspice on one deck | `CD.format_cross_check(CD.cross_check(text))` |
@@ -294,15 +321,11 @@ Raw SKILL is a supported escape hatch, not a failure.
   check and save, then netlist. For PDK devices run the CDF callbacks.
 - **Simulate the saved schematic,** never a hand-written netlist standing in for
   it. For GUI-equivalent results keep the netlist, models, corner and options.
-- **Drawn schematics read like a hand drawing, and you draw them yourself.** Before creating any schematic,
-  read `references/schematic-drawing.md` and follow it per block: plan the columns (VDD to VSS, mirrored halves),
-  read each symbol's pin positions (never assume a PDK's), place every device at chosen coordinates, and join
-  terminals with real wires (`schematic_create_wire_between_instance_terms`, `"draw"`), never the autorouter.
-  Labels only for nets used in many places, to avoid a crossing, or for pins. This overrides the label-only
-  examples in `references/virtuoso/` (`add_net_label_to_transistor`, `schematic_label_instance_term`,
-  "No wires" in `schematic-recreation.md`). Do not write a generic generator that labels every terminal.
-  **A block is done only when** `schCheck` is clean, `lib/schlint.py` reports PASS, and you have looked at a
-  rendered PNG of it.
+- **Drawn schematics: see the hard rule at the top of this file.** Load `lib/schdraw.il` in the CIW
+  (`virtuoso-bridge load <aspice>/lib/schdraw.il`), read `references/schematic-drawing.md`, and draw each sheet
+  with `aspPlace` / `aspWire` (or `schematic_create_wire_between_instance_terms`, `"draw"`), never the autorouter.
+  This overrides the label-only examples in `references/virtuoso/` (`add_net_label_to_transistor`,
+  `schematic_label_instance_term`, `schematic_create_net_stub`, "No wires" in `schematic-recreation.md`).
 
 | Operation | Reference (`references/virtuoso/`) |
 |---|---|
