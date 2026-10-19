@@ -315,6 +315,12 @@ Raw SKILL is a supported escape hatch, not a failure.
   user; never press Enter/Cancel blindly, never resubmit or restart the daemon
   to unblock a wait. To see what is blocking, capture the screen over
   SSH/X11 (`troubleshooting.md`) and show the user.
+- **A library added to `cds.lib` is invisible until `ddUpdateLibList()` succeeds.** The refresh aborts
+  ("Update Lib List ... aborted", then "Unable to find the master file for LIB/CELL/schematic") while any
+  cellview from a library that was removed from `cds.lib` is still open. Close those windows and purge the
+  cellviews, then refresh:
+  `foreach(w hiGetWindowList() when(w~>cellView && w~>cellView~>libName == "OLD" hiCloseWindow(w)))
+  foreach(cv dbGetOpenCellViews() when(cv~>libName == "OLD" dbPurge(cv))) ddUpdateLibList()`
 - **Verify before calling.** Check SKILL signatures against the installed
   Cadence docs (`references/virtuoso/local-docs.md`) and read real cell pins and
   CDF parameters before placing. `nf` vs `fingers` vs `w` are PDK-specific.

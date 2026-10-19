@@ -1,5 +1,10 @@
 # Drawing a schematic a human can review
 
+Evidence (EMiT SAR ADC benchmark, 2026-10): with this guide and `lib/schdraw.il`, an agent drew a full 8-bit SAR ADC
+(gate library, StrongARM comparator, bootstrapped switch, bridge CDAC, SAR logic, top level) as wired sheets: 50 %
+of nets joined only by labels against 92-100 % for 20 runs without it, 0 labels in the leaf gates, and the same
+design score and API cost as runs without it (the guide adds about 9 k tokens of context, about $0.80 of $35).
+
 Read this before creating any schematic. You draw each block yourself: choose where every device goes and which
 terminals each wire joins. Do not write a generic "device list -> schematic" generator that labels every terminal;
 that produces a correct netlist nobody can read, and it is the failure this guide exists to prevent.
