@@ -46,6 +46,28 @@ uses net labels, including the ones in `references/virtuoso/`.
   every pin), redraw it before you go on. Simulating an unreadable schematic does not count as progress.
   Details and a worked pattern: `references/schematic-drawing.md`.
 
+## Any layout you create must perform like its schematic (hard rule)
+
+DRC clean + LVS MATCH is not done. A layout is done when its **extracted (PEX) netlist meets the same specs as the
+schematic**: each key measure within 10 % of the schematic value at the typical RC corner, and the spec still met
+at the worst corner. A StrongARM comparator laid out as one 66 um row was LVS clean and 5.9x slower after
+extraction (189 ps schematic, 1.11 ns PEX). Check every block before it is instantiated anywhere else.
+
+- **Run it with** `virtuoso-bridge verify LIB CELL --steps drc,lvs,pex,post --corners typical,rcworst
+  --testbench tb_CELL.sp` (virtuoso-bridge-lite-emit fork; its `verify` skill has the testbench format and
+  settings). It exports GDS/CDL in batch, runs PVS DRC/LVS, Quantus, and the testbench on the schematic and on
+  each extracted corner, and names the nets with the most parasitic C/R. Save the cellviews first.
+- **Close the loop on the layout, not the schematic.** If post-layout misses, move or widen what the worst-net
+  list points at, re-save, re-run. Resizing devices to hide a layout gap only counts if the schematic checks are
+  re-run too. Report the final pre/post table and the number of layout iterations.
+- **Draw it so the loop converges fast:** floorplan first (signal flow, aspect at most 2:1, rails on the long
+  edges, never one long row of devices); devices that share a fast or high-impedance node sit next to each other
+  (minimum-width wire is roughly 0.1-0.2 fF/um: if a node's wire cap exceeds its device cap, re-place);
+  matched devices interdigitated or common-centroid with dummies; differential halves mirror-symmetric and routed
+  identically; one preferred direction per metal; clocks and digital lines kept away from or shielded from
+  sensitive analog nodes; taps along every row, guard rings around sensitive blocks; pins on block edges with the
+  schematic's names. Full list: `references/layout-guidelines.md`.
+
 ## Pick the backend
 
 | Situation | Use | Where |
