@@ -53,10 +53,11 @@ schematic**: each key measure within 10 % of the schematic value at the typical 
 at the worst corner. A StrongARM comparator laid out as one 66 um row was LVS clean and 5.9x slower after
 extraction (189 ps schematic, 1.11 ns PEX). Check every block before it is instantiated anywhere else.
 
-- **Run it with** `virtuoso-bridge verify LIB CELL --steps drc,lvs,pex,post --corners typical,rcworst
-  --testbench tb_CELL.sp` (virtuoso-bridge-lite-emit fork; its `verify` skill has the testbench format and
-  settings). It exports GDS/CDL in batch, runs PVS DRC/LVS, Quantus, and the testbench on the schematic and on
-  each extracted corner, and names the nets with the most parasitic C/R. Save the cellviews first.
+- **Run it with** `python <aspice>/scripts/verify.py LIB CELL --steps drc,lvs,pex,post --corners typical,rcworst
+  --testbench tb_CELL.sp` (the bridge-lite Python; settings `VB_PV_*` / `VB_QRC_CORNERS` in the bridge `.env`;
+  testbench format and settings in `references/verify.md`). It exports GDS/CDL in batch, runs PVS DRC/LVS,
+  Quantus, and the testbench on the schematic and on each extracted corner, and names the nets with the most
+  parasitic C/R. Save the cellviews first.
 - **Close the loop on the layout, not the schematic.** If post-layout misses, move or widen what the worst-net
   list points at, re-save, re-run. Resizing devices to hide a layout gap only counts if the schematic checks are
   re-run too. Report the final pre/post table and the number of layout iterations.
