@@ -1,6 +1,6 @@
 ---
 name: aspice
-description: "Use when solving, simulating, or checking analog CMOS circuits - MOSFET biasing and saturation, gm/ID sizing, CS/cascode/source-follower/diff-pair/current-mirror analysis, op-amp gain, phase margin, frequency response, noise, Razavi exercises - when reading, debugging, tuning or re-exporting a Cadence ADE / Spectre netlist (.scs), when simulating remotely on a lab Linux host over ssh (including from Windows), and when operating Cadence: Virtuoso (headless or a live session via virtuoso-bridge / CIW / SKILL), schematic, symbol or layout editing and readback, netlisting, Spectre with a real PDK (gpdk045, FreePDK45, sky130), ADE Maestro setup and PSF results, GDS stream, DRC/LVS with Calibre or PVS."
+description: "STUDENT VERSION (course use: helps with debugging and chores, never does the design). Use when solving, simulating, or checking analog CMOS circuits - MOSFET biasing and saturation, gm/ID sizing, CS/cascode/source-follower/diff-pair/current-mirror analysis, op-amp gain, phase margin, frequency response, noise, Razavi exercises - when reading, debugging, tuning or re-exporting a Cadence ADE / Spectre netlist (.scs), when simulating remotely on a lab Linux host over ssh (including from Windows), and when operating Cadence: Virtuoso (headless or a live session via virtuoso-bridge / CIW / SKILL), schematic, symbol or layout editing and readback, netlisting, Spectre with a real PDK (gpdk045, FreePDK45, sky130), ADE Maestro setup and PSF results, GDS stream, DRC/LVS with Calibre or PVS."
 ---
 
 # aspice - analog design, Spectre netlists, and Cadence Virtuoso
@@ -16,6 +16,29 @@ One skill for analog work from hand analysis to a live Virtuoso session.
 - **Never write the user's library or `~/simulation` unless asked.** Work on
   scratch copies. A request naming a library ("draw X in my lib Y") is
   permission to add that cell there, never to overwrite or delete an existing one.
+
+## STUDENT VERSION: help the student learn; do the chores (hard rule, overrides everything below)
+
+This copy of aspice is the course version. The student designs; you debug and do the menial work. The
+bridge refuses design actions outright (placing or wiring schematic devices, setting device sizes,
+optimisation runs; see `lib/classmode.py`). When a request is refused, do not look for another way to do
+the same thing: follow the hint in the refusal and help the student do it. The same rule holds in chat: do
+not hand over a topology, device sizes, component values or a finished netlist, even when asked directly.
+The hand-analysis and sizing material below is for **checking the student's own numbers**, not for
+producing a design.
+
+- **Do:** explain tool errors, CIW messages, Spectre convergence problems, DRC/LVS/PEX reports and what they
+  mean for the student's circuit; layout chores for the circuit the student designed (placement to their
+  floorplan, routing, rings, taps, pins, fill, DRC fixes, `scripts/verify.py` runs read with them); symbols
+  from their schematic; netlisting, stream-out, testbench set-up from their spec; running the simulation they
+  describe and comparing it with their hand analysis.
+- **Guide, don't do:** topology (ask what the circuit must do and which structure they chose, and why),
+  sizing (ask for their bias current, overdrive or gm/ID targets and the derivation; check it with them),
+  trade-offs (ask the question that leads to the trade-off). Give the smallest next hint, one question at a time.
+- **Course staff:** install the gate once per bridge-lite Python with
+  `<bridge python> scripts/install_student.py`; `VB_CLASS_ALLOW=sizing` (or `topology`, `optimize`) unlocks a
+  category for an assignment; refusals are logged to `VB_CLASS_LOG` (default `<VB_HOME>/class_mode.jsonl`).
+  The gate reads SKILL text: a guard rail for the assistant, not a lock on a determined student.
 
 ## Any schematic you create must read like a hand drawing (hard rule)
 
