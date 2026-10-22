@@ -129,11 +129,21 @@ def test_report_table_changes_vs_schematic():
     assert "failed" in rep.text() and "+400%" in rep.text()
 
 
+def test_splice_nf_only_where_aucdl_dropped_it():
+    from aspverify.postlayout import splice_nf, parse_nf_print
+    cdl = "MM4 VOUT N1 VDD VDD g45p1svt m=1 l=120n w=88u\nMM1 N1 VINP TAIL VSS g45n1svt m=1 l=300n w=108u nf=4\n"
+    out = splice_nf(cdl, {"MM4": "44", "MM1": "9"})
+    assert "MM4 VOUT N1 VDD VDD g45p1svt m=1 l=120n w=88u nf=44" in out
+    assert out.count("nf=") == 2 and "nf=9" not in out
+    assert parse_nf_print('noise\nNF|MM4|44\nNF|MM1|"4"\n') == {"MM4": "44", "MM1": "4"}
+
+
 def test_net_parasitics_groups_subnodes():
-    net = ("Rk1 OUTP#3 OUTP#4 75.0 $metal1_conn\nRk2 VSS#1 VSS#2 10\n"
+    net = ("Rk1 OUTP#3 OUTP#4 75.0 $metal1_conn\nRk1b OUTP#1 OUTP#2 10\nRk2 VSS#1 VSS#2 10\n"
            "C1 OUTP OUTN 8e-16\nC2 OUTP#6 VSS 2e-16\n")
     rows = {r["net"]: r for r in net_parasitics(net)}
     assert rows["OUTP"]["cap_ff"] == 1.0 and rows["OUTP"]["res_ohm"] == 75.0
+    assert rows["OUTP"]["res_segs"] == 2
     assert rows["OUTN"]["cap_ff"] == 0.8 and rows["VSS"]["cap_ff"] == 0.2
     assert net_parasitics(net)[0]["net"] == "OUTP"
 

@@ -93,6 +93,34 @@ hnlNetlistFileName = "netlist"
 """
 
 
+def _schematic_nf(host: VerifyHost, cfg: VerifyConfig, lib: str, cell: str, view: str,
+                 run_dir: str) -> dict[str, str]:
+    """Instance name -> nf from the schematic CDF. Empty if Virtuoso cannot be started.
+
+    auCdl drops nf. The value is read back so the schematic simulation is the device
+    that was drawn, not one finger of the total width. Failure here does not fail CDL.
+    """
+    virt = str(PurePosixPath(cfg.si).parent / "virtuoso") if cfg.si else ""
+    if not virt or not host.exists(virt):
+        return {}
+    il = f"{run_dir}/nf.il"
+    code = (
+        'cv = dbOpenCellViewByType(%s %s %s nil "r")\n'
+        'unless(cv error("cannot open schematic"))\n'
+        'foreach(i cv~>instances\n'
+        ' let((cdf p) cdf = cdfGetInstCDF(i)\n'
+        '  when(cdf p = cdfFindParamByName(cdf "nf")\n'
+        '   when(p && p~>value != nil printf("NF|%%s|%%L\\n" i~>name p~>value)))))\n'
+        'dbClose(cv)\n'
+    ) % (_q(lib), _q(cell), _q(view))
+    host.write_text(il, 'let((res) res = errset(progn(\n%s\n) t)\n'
+                    ' unless(res printf("NFERR|%%L\\n" errset.errset)))\nexit()\n' % code)
+    host.run(f"cd {_q(run_dir)} && {_q(virt)} -nograph -nocdsinit -cdslib {_q(cfg.cds_lib)} "
+             f"-replay {_q(il)} -log nf.log > nf.out 2>&1", cwd=run_dir, timeout=240)
+    from aspverify.postlayout import parse_nf_print
+    return parse_nf_print(host.read_text(f"{run_dir}/nf.out") or "")
+
+
 def export_cdl(host: VerifyHost, cfg: VerifyConfig, lib: str, cell: str, run_dir: str,
                view: str = "schematic") -> StepResult:
     t0 = time.time()
@@ -106,6 +134,11 @@ def export_cdl(host: VerifyHost, cfg: VerifyConfig, lib: str, cell: str, run_dir
     ok = bool(text) and re.search(rf"^\.SUBCKT\s+{re.escape(cell)}\b", text, re.M | re.I) is not None
     if ok:
         summary = f"CDL netlist of {lib}/{cell}/{view}"
+        nf = _schematic_nf(host, cfg, lib, cell, view, run_dir)
+        if nf:
+            from aspverify.postlayout import splice_nf
+            host.write_text(netlist + ".spectre", splice_nf(text, nf))
+            summary += f"; nf copied onto {len(nf)} devices for the schematic sim"
     else:
         log = host.read_text(f"{run_dir}/si.out") or ""
         errs = [ln for ln in log.splitlines() if "*Error*" in ln or "ERROR" in ln]
@@ -234,7 +267,9 @@ def run_pex(host: VerifyHost, cfg: VerifyConfig, cell: str, svdb: str, corner: s
     if ok:
         names = parse_nxf(host.read_text(f"{svdb}/{cell}.nxf") or "", cell)
         worst = net_parasitics(host.read_text(out) or "", names)[:8]
-        top = ", ".join(f"{w['net']} {w['cap_ff']:.2f} fF/{w['res_ohm']:.0f} ohm" for w in worst[:5])
+        top = ", ".join(
+            f"{w['net']} {w['cap_ff']:.2f} fF/max {w['res_ohm']:.0f} ohm ({w['res_segs']} segs)"
+            for w in worst[:5])
         summary = (f"{corner}: {stats.get('R', 0)} R, {stats.get('C', 0)} C extracted; "
                    f"largest nets: {top}")
     else:
@@ -362,13 +397,15 @@ def parse_nxf(text: str, cell: str) -> dict[str, str]:
 
 
 def net_parasitics(netlist: str, names: dict[str, str] | None = None) -> list[dict]:
-    """Total parasitic C (fF, ground + coupling) and series R (ohm) per net of an extracted netlist.
+    """Parasitic C (fF, ground + coupling) and the largest series-R segment per net.
 
-    Sub-nodes ``NET#3`` count toward ``NET``; *names* maps layout net names to schematic
-    ones (from :func:`parse_nxf`). Sorted by capacitance, largest first.
+    The resistor field is the max segment, not the sum of the mesh. Sub-nodes ``NET#3``
+    count toward ``NET``. *names* maps layout net names to schematic ones. Sorted by
+    capacitance, largest first.
     """
     cap: dict[str, float] = {}
-    res: dict[str, float] = {}
+    res_n: dict[str, int] = {}
+    res_max: dict[str, float] = {}
     for line in netlist.replace("\n+", " ").splitlines():
         t = line.split()
         if len(t) < 4 or t[0][0] not in "RrCc" or t[0].startswith("*"):
@@ -382,8 +419,11 @@ def net_parasitics(netlist: str, names: dict[str, str] | None = None) -> list[di
             for n in {a, b}:
                 cap[n] = cap.get(n, 0.0) + v * 1e15
         elif a == b:
-            res[a] = res.get(a, 0.0) + v
-    nets = set(cap) | set(res)
+            res_n[a] = res_n.get(a, 0) + 1
+            if v > res_max.get(a, 0.0):
+                res_max[a] = v
+    nets = set(cap) | set(res_n)
     names = names or {}
-    rows = [{"net": names.get(n, n), "cap_ff": round(cap.get(n, 0.0), 3), "res_ohm": round(res.get(n, 0.0), 1)} for n in nets]
+    rows = [{"net": names.get(n, n), "cap_ff": round(cap.get(n, 0.0), 3),
+             "res_ohm": round(res_max.get(n, 0.0), 1), "res_segs": res_n.get(n, 0)} for n in nets]
     return sorted(rows, key=lambda r: -r["cap_ff"])
