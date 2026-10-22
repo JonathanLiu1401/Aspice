@@ -49,6 +49,39 @@ class T(unittest.TestCase):
         self.assertIn('inv', text)
         self.assertNotIn('MP (y a vdd', text)
 
+    def test_quantus_continuation_model_and_both_cap_terminals(self):
+        # Real Quantus puts the model on a '+' line and names MIM caps as X instances.
+        deck = """.SUBCKT cdac top bot vss
+MX1 d g s b
++ g45n1svt L=4.5e-08 W=1.2e-07
+XCX1 top bot VSS g45cmim l=5e-06 w=5e-06
+C1 top vss 2e-15
+C2 top bot 1e-15
+C3 top#1 vss 1e-15
+.ENDS
+"""
+        text = NB.pex_brief(deck, top=5)
+        self.assertIn('g45n1svt x1', text)
+        self.assertNotIn('VSS x', text)
+        self.assertIn('g45cmim x1', text)
+        self.assertIn('subckts: cdac', text)
+        self.assertRegex(text, r'vss\s+3\.00 fF')
+        self.assertRegex(text, r'bot\s+1\.00 fF')
+        self.assertIn('+2 more nets', NB.pex_brief(deck, top=1))
+
+    def test_ade_include_does_not_drop_the_hierarchy(self):
+        deck = """simulator lang=spectre
+include "models.scs" section=tt
+subckt inv a y vdd vss
+MP (y a vdd vdd) pch w=2u l=180n
+MN (y a vss vss) nch w=1u l=180n
+ends inv
+"""
+        text = NB.scs_brief(deck)
+        self.assertIn('inv', text)
+        self.assertIn('nch', text)
+        self.assertIn('pch', text)
+
 
 if __name__ == '__main__':
     unittest.main()
