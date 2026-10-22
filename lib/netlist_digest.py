@@ -312,6 +312,16 @@ def summary(nl) -> str:
     return "\n".join(lines)
 
 
+_SIZE_PARAMS = ("w", "l", "nf", "fw", "m", "fingers")
+
+
+def _size_first(sig):
+    """Sizing parameters first, so a width limit cannot cut w/l/nf off the row."""
+    front = [p for p in _SIZE_PARAMS if p in sig]
+    tail = [p for p in sig if p not in front]
+    return front, tail
+
+
 def device_rollup(nl, scope=None) -> str:
     """Group instances by (master, param-name signature). Collapse counts and ranges."""
     groups = defaultdict(list)
@@ -331,11 +341,14 @@ def device_rollup(nl, scope=None) -> str:
     for master, sig in keys:
         plist = groups[(master, sig)]
         count = len(plist)
-        bits = []
-        for pname in sig:
-            values = [str(p.get(pname, "")) for p in plist]
-            bits.append(f"{pname}={_format_param_span(values)}")
-        rows.append((master, count, " ".join(bits)))
+        front, tail = _size_first(sig)
+        def span(names):
+            bits = []
+            for pname in names:
+                values = [str(p.get(pname, "")) for p in plist]
+                bits.append(f"{pname}={_format_param_span(values)}")
+            return " ".join(bits)
+        rows.append((master, count, span(front), span(tail)))
 
     if not rows:
         return ""
@@ -343,9 +356,12 @@ def device_rollup(nl, scope=None) -> str:
     m_w = min(20, max(len(r[0]) for r in rows))
     c_w = max(len(str(r[1])) for r in rows)
     lines = []
-    for master, count, rest in rows:
-        line = f"{master:<{m_w}}  x{count:<{c_w}}  {rest}".rstrip()
-        lines.append(_fit(line))
+    for master, count, front, tail in rows:
+        # w/l/nf/m stay whole. Other CDF fields may be shortened.
+        line = f"{master:<{m_w}}  x{count:<{c_w}}  {front}".rstrip()
+        lines.append(line)
+        if tail:
+            lines.append(_fit(" " * (m_w + c_w + 6) + tail))
     if extra:
         lines.append(_fit(f"+{extra} more device groups"))
     return "\n".join(lines)

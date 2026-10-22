@@ -52,6 +52,16 @@ def pex_brief(text: str, top: int = 12) -> str:
         try:
             v = float(toks[3])
         except ValueError:
+            # Quantus keeps a PDK device as ``Cname n1 n2 model'' with L/W on a continuation.
+            # That is a device, not a parasitic.
+            if (len(toks) >= 4 and toks[0][0] in "CcRr" and "#" not in toks[3]
+                    and not toks[3][0].isdigit()):
+                if kind in "Cc":
+                    n_c -= 1
+                elif kind in "Rr":
+                    n_r -= 1
+                n_x += 1
+                inst[toks[3]] = inst.get(toks[3], 0) + 1
             continue
         a, b = (n.split('#')[0] for n in toks[1:3])
         if toks[0][0] in 'Cc':
