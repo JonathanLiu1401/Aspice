@@ -26,17 +26,33 @@ def pairs_from_netlist(path):
     if not rep['points']:
         return rep_pairs
     import spectre_netlist as SN  # noqa: F401
+    flat = OP.flatten(OP.SN.parse_netlist(Path(path).read_text(errors='replace')))
     devs = {}
     for r in rep['points'][0]['devices']:
-        d = OP.Device(r['device'], r['master'], r['nets']['d'], r['nets']['g'], r['nets']['s'],
-                      r['nets']['b'], {}, {'vth': r['vth']})
+        master, nets, params = flat.get(r['device'], (r['master'], [r['nets'][k] for k in 'dgsb'], {}))
+        d = OP.Device(r['device'], master, nets[0], nets[1], nets[2], nets[3], params,
+                      {'vth': r['vth']})
         d.role = r['role']
         devs[d.path] = d
     pairs, mirrors = OP.find_groups(devs)
-    leaf = lambda p: p.split('.')[-1]  # noqa: E731
-    rep_pairs += [(leaf(a.path), leaf(b.path)) for a, b in pairs]
+
+    def leaf(path, all_paths):
+        name = path.split('.')[-1]
+        # Two different devices named MP must not collapse into a pair of a device with itself.
+        if sum(p.split('.')[-1] == name for p in all_paths) > 1:
+            return None
+        return name
+
+    paths = [d.path for d in devs.values()]
+    for a, b in pairs:
+        la, lb = leaf(a.path, paths), leaf(b.path, paths)
+        if la and lb and la != lb:
+            rep_pairs.append((la, lb))
     for ref, outs in mirrors:
-        rep_pairs += [(leaf(ref.path), leaf(m.path)) for m in outs]
+        for m in outs:
+            la, lb = leaf(ref.path, paths), leaf(m.path, paths)
+            if la and lb and la != lb:
+                rep_pairs.append((la, lb))
     return rep_pairs
 
 

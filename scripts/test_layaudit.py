@@ -36,6 +36,29 @@ class T(unittest.TestCase):
         self.assertIn('20  pdk/nmos', text)
         self.assertNotIn('M0', text)
 
+    def test_worst_instance_of_a_master_is_checked(self):
+        insts = {
+            'I0': inst('I0', 'sarlib/cdac', 0, 0, 10, 10),
+            'I1': inst('I1', 'sarlib/cdac', 0, 12, 40, 10),
+        }
+        f = LA.audit(Rect(0, 0, 40, 30), insts, lib='sarlib')
+        self.assertTrue(any(x[0] == 'FAIL' and x[1] == 'aspect' and x[2] == 'sarlib/cdac' for x in f))
+
+    def test_blank_pin_is_not_a_dummy(self):
+        mend = inst('Mend', 'pdk/nmos', 6, 0, 1, 1, nets={'D': 'sig', 'G': '', 'S': '', 'B': ''})
+        self.assertFalse(mend.is_dummy())
+
+    def test_missing_centroid_group_warns(self):
+        insts = {'MA1': inst('MA1', 'pdk/nmos', 0, 0, 1, 1), 'MA2': inst('MA2', 'pdk/nmos', 2, 0, 1, 1)}
+        f = LA.audit(Rect(0, 0, 4, 2), insts, groups={'A': '^MA', 'B': '^NO_SUCH'})
+        self.assertTrue(any(x[1] == 'centroid' and x[0] == 'WARN' and 'NO_SUCH' in x[3] for x in f))
+
+    def test_reversed_bbox_is_not_infinite(self):
+        text = LA.brief(Rect(5, 5, 0, 0), {})
+        self.assertIn('aspect 1.00', text)
+        self.assertNotIn('inf', text)
+        self.assertIn('aspect n/a', LA.brief(Rect(0, 0, 0, 0), {}))
+
     def test_leaf_height_exempts_standard_cell_rows(self):
         insts = {'X': inst('X', 'lib/dffnr', 0, 0, 5.9, 2.3)}
         f = LA.audit(Rect(0, 0, 6, 6), insts, lib='lib', leaf_height=2.5)

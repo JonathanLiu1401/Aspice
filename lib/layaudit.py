@@ -40,8 +40,9 @@ class LInst:
     def is_dummy(self):
         if DUMMY_RE.search(self.name):
             return True
-        nets = {n for n in self.nets.values() if n}
-        return len(self.nets) >= 3 and len(nets) == 1
+        # A blank terminal is unrouted, not tied off. Every pin must be on the same net.
+        vals = list(self.nets.values())
+        return len(vals) >= 3 and all(vals) and len(set(vals)) == 1
 
 
 def read_layout(run, lib, cell, view='layout'):
@@ -77,10 +78,10 @@ def rows_of(insts, tol=1e-3):
     rows = []
     for i in sorted(insts, key=lambda x: (x.bbox.y0, x.bbox.x0)):
         for row in rows:
+            # Do not grow the row. A tall device that overlaps this row must not
+            # swallow the row above it.
             if i.bbox.y0 < row['y1'] - tol and i.bbox.y1 > row['y0'] + tol:
                 row['insts'].append(i)
-                row['y0'] = min(row['y0'], i.bbox.y0)
-                row['y1'] = max(row['y1'], i.bbox.y1)
                 break
         else:
             rows.append({'y0': i.bbox.y0, 'y1': i.bbox.y1, 'insts': [i]})
@@ -108,13 +109,20 @@ def audit(cellbox, insts, area_budget=None, pairs=(), groups=None, device_re=Non
         f.append(('FAIL', 'aspect', '-', 'aspect ratio %.2f > 2: fold rows or stack blocks; aim for 1:1' % asp))
     elif asp > 1.5:
         f.append(('WARN', 'aspect', '-', 'aspect ratio %.2f: aim for 1:1' % asp))
+    # Worst outline of each same-library master, not the first instance only.
     seen = {}
     for i in insts.values():
-        if i.master in seen or (lib and not i.master.startswith(lib + '/')):
+        if lib and not i.master.startswith(lib + '/'):
             continue
-        seen[i.master] = i
-    for m, i in sorted(seen.items()):
-        w, h = i.bbox.w, i.bbox.h
+        w, h = abs(i.bbox.w), abs(i.bbox.h)
+        if min(w, h) <= 0:
+            continue
+        a = max(w, h) / min(w, h)
+        prev = seen.get(i.master)
+        if prev is None or a > prev[0]:
+            seen[i.master] = (a, i)
+    for m, (_a, i) in sorted(seen.items()):
+        w, h = abs(i.bbox.w), abs(i.bbox.h)
         if min(w, h) <= 0 or (leaf_height and min(w, h) <= leaf_height + 1e-6):
             continue
         a = max(w, h) / min(w, h)
@@ -140,7 +148,9 @@ def audit(cellbox, insts, area_budget=None, pairs=(), groups=None, device_re=Non
         ins = row['insts']
         if not any(i.key in matched for i in ins):
             continue
-        for end, i in (('left', ins[0]), ('right', ins[-1])):
+        left = min(ins, key=lambda i: (i.bbox.x0, i.bbox.x1))
+        right = max(ins, key=lambda i: (i.bbox.x1, i.bbox.x0))
+        for end, i in (('left', left), ('right', right)):
             if not i.is_dummy():
                 f.append(('WARN', 'dummies', 'row%d' % k, '%s end of the row is active device %s: '
                           'add a dummy so matched devices see identical neighbours' % (end, i.name)))
@@ -174,8 +184,10 @@ def audit(cellbox, insts, area_budget=None, pairs=(), groups=None, device_re=Non
         cents = {}
         for g, rx in groups.items():
             mem = [i for i in insts.values() if re.search(rx, i.key)]
-            if mem:
-                cents[g] = (sum(i.bbox.cx for i in mem) / len(mem), sum(i.bbox.cy for i in mem) / len(mem))
+            if not mem:
+                f.append(('WARN', 'centroid', g, 'group %s matched no instances (%s)' % (g, rx)))
+                continue
+            cents[g] = (sum(i.bbox.cx for i in mem) / len(mem), sum(i.bbox.cy for i in mem) / len(mem))
         if len(cents) > 1:
             xs = [c[0] for c in cents.values()]
             ys = [c[1] for c in cents.values()]
@@ -200,11 +212,11 @@ def brief(cellbox, insts, max_masters=16):
     """One screen of a layout: size and a rollup by master. Not every instance, not every shape."""
     if cellbox is None:
         return 'layout: (empty)'
-    w, h = cellbox.w, cellbox.h
+    w, h = abs(cellbox.w), abs(cellbox.h)
     short = min(w, h)
-    aspect = (max(w, h) / short) if short > 1e-9 else float('inf')
-    lines = ['layout: %.2f x %.2f um   area %.1f um2   aspect %.2f   %d instances' % (
-        w, h, w * h, aspect, len(insts))]
+    aspect = (max(w, h) / short) if short > 1e-9 else None
+    lines = ['layout: %.2f x %.2f um   area %.1f um2   aspect %s   %d instances' % (
+        w, h, w * h, ('%.2f' % aspect) if aspect is not None else 'n/a', len(insts))]
     by = {}
     for i in insts.values():
         by.setdefault(i.master, []).append(i)

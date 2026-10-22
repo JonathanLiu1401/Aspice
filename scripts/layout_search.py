@@ -32,7 +32,7 @@ def cards():
     for path in sorted(KB.glob('*.md')):
         if path.name == 'SOURCES.md':
             continue
-        text = path.read_text()
+        text = path.read_text(errors='replace')
         title = text.splitlines()[0].lstrip('# ').strip() if text.startswith('#') else path.stem
         out.append({'id': path.stem, 'title': title, 'path': str(path.relative_to(ROOT)), 'text': text})
     return out
@@ -108,18 +108,20 @@ def search(query, k=4):
     sem = [0.0] * len(rows)
     how = 'keyword'
     idx = _load_index()
-    if idx is not None:
-        by_id = {c['id']: c.get('vector') for c in idx.get('cards', [])}
+    # A foreign or corrupt index must not outrank the keyword hit or abort the search.
+    if isinstance(idx, dict) and idx.get('model') == MODEL and idx.get('cards'):
         try:
-            qv = embed(query, model=idx.get('model', MODEL))
+            by_id = {c['id']: c.get('vector') for c in idx['cards'] if isinstance(c, dict) and 'id' in c}
+            qv = embed(query, model=MODEL)
             qn = _norm(qv)
             for i, row in enumerate(rows):
                 vec = by_id.get(row['id'])
-                if vec:
+                if vec and len(vec) == len(qv) and all(isinstance(x, (int, float)) for x in vec):
                     sem[i] = _dot(qv, vec) / (qn * _norm(vec))
-            how = 'keyword+embedding (%s)' % idx.get('model', MODEL)
-        except (urllib.error.URLError, TimeoutError, RuntimeError, OSError):
+            how = 'keyword+embedding (%s)' % MODEL
+        except (urllib.error.URLError, TimeoutError, RuntimeError, OSError, TypeError, KeyError, ValueError):
             how = 'keyword (ollama unavailable)'
+            sem = [0.0] * len(rows)
     kw_max = max(kw) or 1
     ranked = sorted(range(len(rows)), key=lambda i: -(kw[i] / kw_max + sem[i]), )
     print('search: %s' % how)
