@@ -49,7 +49,8 @@ Stop conditions:
 - You are about to add a bond pad, probe pad, pad opening, seal ring, or I/O ESD. Stop.
   This ADC is a block, not a chip. Diffusion contacts and vias stay; those are not pads.
 - The top cell or any block is past 2:1, or you are about to leave it as one long row.
-  Stop. Fold it. Target is 1:1.
+  Stop. Fold it. Target is 1:1. A one-row standard cell is exempt only if `layout_audit.py`
+  is given `--leaf-height`. The default command does not exempt it.
 - You have run a top-level simulation to decide a single wire. Stop. That decision
   belongs in the generator.
 - You are about to open an extracted netlist, a CDL, a PSF, or a DRC dump. Stop. Use

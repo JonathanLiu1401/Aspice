@@ -38,8 +38,9 @@ benchmarks none of the 14 SAR ADC layouts met spec after extraction, while the s
   (1.5-1.6) but drew the CDAC at 2.6-2.8:1 and a sampling switch at 3.7:1. Fold rows (two
   rows of ABBA instead of one ABBAABBA), split a differential array into halves stacked
   around the comparator rather than in one strip, and pick the row count before placing.
-  Only standard-cell-height logic leaf cells (one inverter, one flip-flop) are exempt; tile
-  them into a square logic block.
+  A one-row inverter or flip-flop is exempt only when you pass `--leaf-height` to
+  `layout_audit.py`. The default audit fails it. Tile those leaves into a square logic
+  block either way.
 - Blocks in signal-flow order, power rails on the long edges.
   Never lay out a block as one long row: fold rows (two rows of ABBA instead of one
   ABBAABBA; cross-coupled 2-D arrays for pairs).

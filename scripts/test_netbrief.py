@@ -69,6 +69,13 @@ C3 top#1 vss 1e-15
         self.assertRegex(text, r'bot\s+1\.00 fF')
         self.assertIn('+2 more nets', NB.pex_brief(deck, top=1))
 
+    def test_quantus_model_device_is_not_a_parasitic(self):
+        deck = "C1 top bot g45cmim\n+ L=5e-06 W=5e-06\nR1 a b ressnpoly\n+ L=2u W=1u\nC2 top 0 1e-15\n"
+        text = NB.pex_brief(deck)
+        self.assertIn('g45cmim x1', text)
+        self.assertIn('ressnpoly x1', text)
+        self.assertIn('counts: 0 R, 1 C, 0 MOS, 2 instances', text)
+
     def test_ade_include_does_not_drop_the_hierarchy(self):
         deck = """simulator lang=spectre
 include "models.scs" section=tt
