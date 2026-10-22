@@ -5,6 +5,8 @@ a schematic netlist from ADE is mostly hierarchy the digest already knows how to
 """
 from __future__ import annotations
 
+import re
+
 
 def pex_brief(text: str, top: int = 12) -> str:
     """Size, device counts, and the nets with the most parasitic C. Not the netlist.
@@ -21,8 +23,11 @@ def pex_brief(text: str, top: int = 12) -> str:
     inst: dict[str, int] = {}
     subckts: list[str] = []
     n_lines = text.count('\n') + (0 if text.endswith('\n') or not text else 1)
-    # Quantus continuation lines start with '+'.
-    for raw in text.replace('\n+', ' ').splitlines():
+    # Quantus '+' continuations, including CRLF and a space before '+'.
+    # A trailing '\' is a Spectre continuation.
+    flat_text = re.sub(r'\\\r?\n', '', text)
+    flat_text = re.sub(r'\r?\n[ \t]*\+', ' ', flat_text)
+    for raw in flat_text.splitlines():
         line = raw.strip()
         if not line or line[0] in '*#/' or line.startswith('//'):
             continue
@@ -54,19 +59,21 @@ def pex_brief(text: str, top: int = 12) -> str:
         except ValueError:
             # Quantus keeps a PDK device as ``Cname n1 n2 model'' with L/W on a continuation.
             # That is a device, not a parasitic.
-            if (len(toks) >= 4 and toks[0][0] in "CcRr" and "#" not in toks[3]
-                    and not toks[3][0].isdigit()):
+            model = _model_before_params(toks)
+            if model and model not in ('VDD', 'VSS', 'GND'):
                 if kind in "Cc":
                     n_c -= 1
                 elif kind in "Rr":
                     n_r -= 1
                 n_x += 1
-                inst[toks[3]] = inst.get(toks[3], 0) + 1
+                inst[model] = inst.get(model, 0) + 1
             continue
         a, b = (n.split('#')[0] for n in toks[1:3])
         if toks[0][0] in 'Cc':
-            for n in {a, b}:
-                cap[n] = cap.get(n, 0.0) + v * 1e15
+            # A cap whose both ends collapse to one net is shorted by the mesh.
+            if a != b:
+                for n in (a, b):
+                    cap[n] = cap.get(n, 0.0) + v * 1e15
         elif a == b:
             res_n[a] = res_n.get(a, 0) + 1
             if v > res_max.get(a, 0.0):

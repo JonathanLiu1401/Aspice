@@ -416,8 +416,9 @@ def net_parasitics(netlist: str, names: dict[str, str] | None = None) -> list[di
             continue
         a, b = (n.split("#")[0] for n in t[1:3])
         if t[0][0] in "Cc":
-            for n in {a, b}:
-                cap[n] = cap.get(n, 0.0) + v * 1e15
+            if a != b:
+                for n in (a, b):
+                    cap[n] = cap.get(n, 0.0) + v * 1e15
         elif a == b:
             res_n[a] = res_n.get(a, 0) + 1
             if v > res_max.get(a, 0.0):

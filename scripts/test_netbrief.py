@@ -76,6 +76,14 @@ C3 top#1 vss 1e-15
         self.assertIn('ressnpoly x1', text)
         self.assertIn('counts: 0 R, 1 C, 0 MOS, 2 instances', text)
 
+    def test_shorted_cap_is_not_load_and_bulk_is_not_the_model(self):
+        deck = "Cint a#1 a#2 10e-15\nCext a#3 vss 1e-15\nC1 top bot VSS\n+ g45cmim L=3e-6 W=4e-6\n"
+        text = NB.pex_brief(deck)
+        self.assertRegex(text, r'\ba\s+1\.00 fF')
+        self.assertNotIn('11.00', text)
+        self.assertIn('g45cmim x1', text)
+        self.assertNotIn('VSS x', text)
+
     def test_ade_include_does_not_drop_the_hierarchy(self):
         deck = """simulator lang=spectre
 include "models.scs" section=tt
