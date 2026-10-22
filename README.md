@@ -10,7 +10,7 @@ step and keeps netlists small enough to fit in a context window. The rules the a
 must follow are [`AGENTS.md`](AGENTS.md) (loaded from [`CLAUDE.md`](CLAUDE.md)).
 
 The benchmark that runs those agents is a separate repository, not part of this package.
-The layout method follows LAYGO (DOI 10.1109/TCSI.2020.3046524) and BAG3++ (DOI 10.1109/OJCAS.2024.3502641). Those papers are not redistributed here.
+The layout method follows LAYGO (DOI 10.1109/TCSI.2020.3046524) and BAG3++ (DOI 10.1109/OJCAS.2024.3502641). BAG3++ is CC BY 4.0 and is in `references/papers/`. The LAYGO PDF is not; IEEE Xplore forbids redistributing it.
 The flow those papers and [laygo2](https://laygo2.github.io/overview.html) describe is
 implemented here by `lib/laygrid.py`.
 
