@@ -101,7 +101,7 @@ extraction (189 ps schematic, 1.11 ns PEX). Check every block before it is insta
 
 ## Layout is a generator, not a search (hard rule)
 
-Drawing shapes and resimulating is a failed run even if the last iteration meets the spec above. Follow laygo2 (https://laygo2.github.io/overview.html): load the tech grid, generate PDK templates, place, route on tracks, pin, export. Here that is `lib/laygrid.py`. `AGENTS.md` is mandatory. Before inventing a structure, `python <aspice>/scripts/layout_search.py "..."`. Papers in `~/EMiT/papers/`: Han et al., LAYGO, IEEE TCAS-I, March 2021; Guo et al., BAG3++, IEEE OJCAS 2025.
+Drawing shapes and resimulating is a failed run even if the last iteration meets the spec above. Follow laygo2 (https://laygo2.github.io/overview.html): load the tech grid, generate PDK templates, place, route on tracks, pin, export. Here that is `lib/laygrid.py`. `AGENTS.md` is mandatory. Before inventing a structure, `python <aspice>/scripts/layout_search.py "..."`. Papers: Han et al., LAYGO, IEEE TCAS-I, March 2021 (DOI 10.1109/TCSI.2020.3046524); Guo et al., BAG3++, IEEE OJCAS 2025 (DOI 10.1109/OJCAS.2024.3502641).
 
 1. **Search, then one floorplan.** Placement and matching: Hastings, *The Art of Analog Layout*, 2nd ed. (2006). Metal grid: Saint & Saint, *IC Mask Design* (2002), and LAYGO. Do not invent a style.
 2. **PDK pcells only.** `laygrid.Template` of the kit's MOSFET, capacitor, and resistor. Never draw a device as rectangles.
@@ -142,14 +142,14 @@ ngspice + PTM, labelled as such.
 
 | Thing | Where |
 |---|---|
-| Python for aspice | `~/.claude/skills-venv/bin/python` (PySpice; ngspice 47 at `~/opt/ngspice`). PySpice is not on the system Python |
-| Python for the bridge | `~/EMiT/virtuoso-mcp-eval/.venv/bin/{python,virtuoso-bridge}` (imports the checkout in `~/EMiT/virtuoso-mcp-eval/tools/virtuoso-bridge-lite`; the bridge docs in `references/virtuoso/` track the newer `~/src/virtuoso-bridge-lite`, so when they disagree the installed package wins: `inspect.signature` it) |
+| Python for aspice | any Python 3 with PySpice and ngspice. `lib/` is the directory next to this file |
+| Virtuoso bridge | `virtuoso-bridge` on `PATH`. The package is vendored at `third_party/virtuoso-bridge-lite` (MIT) and used only if it is not already installed. Live-session notes: `references/virtuoso/` |
 | Libraries | `<skill>/lib/`; models in `<skill>/models/` (empty -> `scripts/fetch_models.py`) |
-| Cadence projects | `print(CD.doctor())`. **EE332** gpdk045 `~/EE332/cadence`; **EE476** FreePDK45 `~/EE476/cadence` (`PDK_DIR` carried by the project); **EMiT** multi-PDK `~/EMiT/cadence` (launch GUI: `~/EMiT/cadence/start_virtuoso.sh`). Select with `$ASPICE_PROJECT`, `CD.use_project(name)`, or `cds_lib=` per call. Pin it - an auto-picked cds.lib once switched projects mid-session |
+| Cadence | `print(CD.doctor())`. Point it at a project with `$ASPICE_PROJECT`, `CD.use_project(name)`, or `cds_lib=` per call. Do not guess someone's home directory. Tool roots: `$ASPICE_EDA_ROOTS`, or a site file (`references/sites/`, `$ASPICE_SITE`) |
 | Broken? | `scripts/analog_selftest.py` checks 13 groups against closed-form answers |
 
 ```python
-import sys; sys.path.insert(0, '/homes/jliu1401/.claude/skills/aspice/lib')
+import sys; sys.path.insert(0, 'lib')   # run from the aspice checkout; lib/ sits next to this file
 from analog_spice import *              # analog design (import instead of PySpice: it patches two bugs)
 import spectre_netlist as SN            # ADE netlist parse / edit / write
 import netlist_digest as ND             # compact views of a big netlist
@@ -158,17 +158,17 @@ import netlist_export as NX, pdk, plots # export, PDK reading, design charts
 import cadence as CD                    # headless Spectre, Virtuoso, OCEAN, Calibre
 ```
 
-## Running Cadence on the UW ECE lab machines
+## Running Cadence on a shared lab
 
-The lab hosts share one NFS home, and heavy Cadence I/O has tipped hosts into
-NFS stalls (Virtuoso starts of 15-60 min, processes stuck in D state).
+Heavy Cadence I/O on NFS stalls Virtuoso (starts of 15-60 min, processes stuck
+in D state). Host names and kit paths are not in this file. They live in a site
+file: `references/sites/uw.env` is the UW ECE lab (`ASPICE_SITE=uw`, selected
+automatically when that lab's tool tree is installed). Copy it for another site.
 
-1. Pick a fast idle host yourself (no need to ask): time 20x `touch`+`stat`
-   on candidates (`ssh linux-lab-1NN.ece.uw.edu`, BatchMode works; 136, 137,
-   143, 144, 145 have been clean). Healthy is ~0.1 s total; a sick host takes
-   seconds and must not run Cadence. Check `uptime`/`who` for idleness.
-2. ssh shells lack the Cadence PATH: `source ~/EMiT/virtuoso-mcp-eval/bin/cadence_env.sh`
-   first (it also puts Cadence `pvs` ahead of `/sbin/pvs`).
+1. Pick a fast idle host from `ASPICE_LAB_HOSTS`: time 20x `touch`+`stat`.
+   Healthy is ~0.1 s total. A sick host must not run Cadence.
+2. ssh shells often lack the Cadence PATH. Source the site's environment script
+   before `virtuoso`, `spectre`, or `pvs`.
 3. Simulate and run DRC/LVS on **local copies** (`/var/tmp/...`), not on
    NFS-hosted libraries; copy results back once.
 4. Launch anything long fully detached: `(setsid nohup CMD > log 2>&1 < /dev/null &)`.
@@ -421,7 +421,7 @@ Raw SKILL is a supported escape hatch, not a failure.
 | SOS, SKILL Finder | `sos-python-api.md`, `skill-finder-python-api.md` |
 | Errors, stalls, connection | `troubleshooting.md` |
 
-Read only the branch you need. Repository examples: `rg --files ~/src/virtuoso-bridge-lite/examples/01_virtuoso`.
+Read only the branch you need. Examples are in the bridge repo, `examples/01_virtuoso`, not a path on one machine.
 
 ---
 
@@ -453,7 +453,7 @@ with `build_schematic` and simulating it in Spectre.
 - `references/pdk-charts-export.md` - PDK scan/probe, gm/ID and other design charts, netlist export package
 - `references/remote-lab-spectre.md` - simulating on a lab host from Windows or any other computer; PDK include lines; accuracy levels
 - `references/cadence-headless.md` - how the headless backend works, and the tool behaviours it works around
-- `references/virtuoso/` - virtuoso-bridge API and live-session references (symlink into `~/src/virtuoso-bridge-lite`)
+- `references/virtuoso/` - virtuoso-bridge API notes, copied into this repo (MIT). The installed package wins if it disagrees.
 - `references/ade-netlist-errors.md` - Spectre failure catalogue; `references/spectre-syntax.md` - syntax table
 - `references/pyspice-cookbook.md` - PySpice recipes and patched bugs; `references/razavi-map.md` - chapter map
 - `examples/` - runnable verified scripts; `corpus/` - 19 ADE netlists with ground truth

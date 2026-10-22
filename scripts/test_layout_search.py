@@ -15,6 +15,19 @@ class T(unittest.TestCase):
         best = rows[max(range(len(rows)), key=lambda i: scores[i])]
         self.assertIn('not-a-chip', best['id'])
 
+    def test_torn_index_falls_back_to_keyword(self):
+        import tempfile
+        real = LS.INDEX
+        try:
+            d = Path(tempfile.mkdtemp())
+            LS.INDEX = d / 'index.json'
+            LS.INDEX.write_text('{"model": "x", "cards":')  # truncated, as a crash mid-write leaves it
+            self.assertIsNone(LS._load_index())
+            rc = LS.search('bond pad', k=1)
+            self.assertEqual(rc, 0)
+        finally:
+            LS.INDEX = real
+
     def test_laygo_query_hits_the_flow_card(self):
         rows = LS.cards()
         scores = LS.keyword_scores('laygo2 placement grid route', rows)

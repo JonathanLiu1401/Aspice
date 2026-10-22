@@ -1,0 +1,1075 @@
+"""Cadence Spectre simulator adapter."""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import time
+import uuid
+import warnings
+from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
+from typing import Any, NamedTuple
+
+from virtuoso_bridge.env import load_vb_env
+from virtuoso_bridge.cadence_env import CadenceEnvironment
+from virtuoso_bridge.profile import resolve_profile
+from virtuoso_bridge.runtime_paths import artifact_dir
+from virtuoso_bridge.models import ExecutionStatus, SimulationResult
+from virtuoso_bridge.spectre.parsers import (
+    parse_psf_ascii_directory,
+    parse_sweep_psf_directory,
+)
+from virtuoso_bridge.transport.tunnel import _is_localhost
+from virtuoso_bridge.transport.remote_paths import (
+    default_remote_spectre_work_dir,
+    resolve_client_id,
+    resolve_remote_username,
+)
+from virtuoso_bridge.transport.remote_roles import remote_host_roles_from_os
+from virtuoso_bridge.transport.ssh import (
+    SSHRunner,
+    run_remote_task,
+    ssh_backend_env_from_os,
+    ssh_proxy_url_from_os,
+)
+
+logger = logging.getLogger(__name__)
+
+
+DEFAULT_PARALLEL_WORKERS = 4
+
+
+SPECTRE_MODE_ARGS: dict[str, list[str]] = {
+    "spectre": [],
+    "aps": ["+aps"],
+    "x": ["+x"],
+    "cx": ["+preset=cx", "+mt"],
+    "ax": ["+preset=ax", "+mt"],
+    "mx": ["+preset=mx", "+mt"],
+    "lx": ["+preset=lx", "+mt"],
+    "vx": ["+preset=vx", "+mt"],
+}
+
+# ---------------------------------------------------------------------------
+# Internal run result (not public API)
+# ---------------------------------------------------------------------------
+
+class _SpectreRunResult(NamedTuple):
+    """Raw execution result before PSF parsing and SimulationResult assembly."""
+
+    success: bool
+    output_dir: Path | None
+    returncode: int
+    stdout: str
+    stderr: str
+    error: str | None
+    metadata: dict[str, Any]
+
+# ---------------------------------------------------------------------------
+# Resource helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_spectre_invocation(
+    spectre_cmd: str,
+) -> tuple[str, list[str]]:
+    """Split a spectre command string into executable + prefix args (e.g. 'eda spectre' → ('/edadk/bin/eda', ['spectre']))."""
+    parts = shlex.split(spectre_cmd) if spectre_cmd.strip() else ["spectre"]
+    return parts[0], parts[1:]
+
+def spectre_mode_args(mode: str) -> list[str]:
+    """Return standard Spectre CLI arguments for a named simulation mode."""
+    key = mode.strip().lower()
+    if key not in SPECTRE_MODE_ARGS:
+        supported = ", ".join(sorted(SPECTRE_MODE_ARGS))
+        raise ValueError(f"Unsupported Spectre mode '{mode}'. Supported: {supported}")
+    return list(SPECTRE_MODE_ARGS[key])
+
+def _build_spectre_argv(
+    *,
+    spectre_cmd: str,
+    spectre_args: list[str] | tuple[str, ...] | None,
+    output_format: str | None,
+    netlist_path: str,
+    raw_dir: str | None = None,
+    log_file: str | None = None,
+) -> list[str]:
+    """Construct a fuller Spectre argv similar to direct production runs."""
+    spectre_bin, cmd_prefix_args = _resolve_spectre_invocation(spectre_cmd)
+    mode_args = [str(a) for a in (spectre_args or []) if str(a).strip()]
+    all_flags = cmd_prefix_args + mode_args
+    argv = [spectre_bin]
+    # Insert subcommand/wrapper prefix args right after binary (e.g. 'eda spectre')
+    argv.extend(cmd_prefix_args)
+    if "-64" not in all_flags and "-32" not in all_flags:
+        argv.append("-64")
+    argv.append(netlist_path)
+    queue_args = [] if "+lqtimeout" in all_flags else ["+lqtimeout", "900"]
+    warning_args = [] if "-maxw" in all_flags else ["-maxw", "5"]
+    notice_args = [] if "-maxn" in all_flags else ["-maxn", "5"]
+    argv.append("+escchars")
+    if log_file:
+        argv.extend(["+log", log_file])
+    if output_format:
+        argv.extend(["-format", output_format])
+    if raw_dir:
+        argv.extend(["-raw", raw_dir])
+    argv.extend(mode_args)
+    argv.extend(queue_args)
+    argv.extend(warning_args)
+    argv.extend(notice_args)
+    argv.append("+logstatus")
+    return argv
+
+
+# ---------------------------------------------------------------------------
+# Local execution
+# ---------------------------------------------------------------------------
+
+def _run_spectre_local(
+    *,
+    netlist: Path,
+    params: dict | None = None,
+    spectre_cmd: str = "spectre",
+    spectre_args: list[str] | tuple[str, ...] | None = None,
+    timeout: int = 600,
+    work_dir: Path | None = None,
+    output_format: str | None = "psfascii",
+    cadence_cshrc: str | None = None,
+    cadence_env: CadenceEnvironment | None = None,
+) -> _SpectreRunResult:
+    """Run Spectre as a local subprocess."""
+    params = params or {}
+    cwd = Path(work_dir) if work_dir is not None else artifact_dir("spectre", netlist.stem)
+    cwd.mkdir(parents=True, exist_ok=True)
+    for include_file in params.get("include_files", []):
+        include_path = Path(include_file).resolve()
+        if include_path.exists():
+            destination = cwd / include_path.name
+            if include_path != destination.resolve():
+                shutil.copy2(include_path, destination)
+    raw_dir = str((Path(cwd) / f"{netlist.stem}.raw").resolve())
+    log_file = str((Path(cwd) / f"{netlist.stem}.log").resolve())
+    cmd = _build_spectre_argv(
+        spectre_cmd=spectre_cmd,
+        spectre_args=list(spectre_args or []) + list(params.get("spectre_args", [])),
+        output_format=output_format,
+        netlist_path=str(netlist),
+        raw_dir=raw_dir,
+        log_file=log_file,
+    )
+    spectre_command = " ".join(shlex.quote(part) for part in cmd)
+    command = cmd
+    environment = cadence_env or CadenceEnvironment(cadence_cshrc or "")
+    if environment.script:
+        command = ["sh", "-c", environment.wrap(spectre_command)]
+    logger.debug("Running Spectre locally: %s (cwd=%s)", spectre_command, cwd)
+
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(cwd),
+        )
+        base_dir = Path(cwd)
+        output_dir = base_dir / f"{netlist.stem}.raw"
+        if not output_dir.exists():
+            output_dir = base_dir / f"{netlist.stem}.psf"
+        return _SpectreRunResult(
+            success=True,
+            output_dir=output_dir if output_dir.exists() else base_dir,
+            returncode=proc.returncode,
+            stdout=proc.stdout or "",
+            stderr=proc.stderr or "",
+            error=None,
+            metadata={"command": spectre_command, "spectre_command": spectre_command},
+        )
+    except FileNotFoundError:
+        return _SpectreRunResult(
+            success=False, output_dir=None, returncode=-1,
+            stdout="", stderr="",
+            error=f"Spectre executable not found: {spectre_cmd}",
+            metadata={"command": spectre_command, "spectre_command": spectre_command},
+        )
+    except subprocess.TimeoutExpired:
+        return _SpectreRunResult(
+            success=False, output_dir=None, returncode=-1,
+            stdout="", stderr="",
+            error=f"Spectre simulation timed out after {timeout} seconds",
+            metadata={"command": spectre_command, "spectre_command": spectre_command},
+        )
+    except OSError as exc:
+        return _SpectreRunResult(
+            success=False, output_dir=None, returncode=-1,
+            stdout="", stderr="",
+            error=f"OS error running Spectre: {exc}",
+            metadata={"command": spectre_command, "spectre_command": spectre_command},
+        )
+
+# ---------------------------------------------------------------------------
+# Remote execution
+# ---------------------------------------------------------------------------
+
+def _run_spectre_remote(
+    *,
+    netlist: Path,
+    params: dict,
+    runner: SSHRunner,
+    remote_work_dir: str,
+    base_output_dir: Path,
+    spectre_cmd: str = "spectre",
+    spectre_args: list[str] | tuple[str, ...] | None = None,
+    output_format: str | None = "psfascii",
+    timeout: int = 600,
+    keep_remote_files: bool = False,
+    cadence_env: CadenceEnvironment | None = None,
+) -> _SpectreRunResult:
+    """Run Spectre on a remote host: upload netlist, run, download results."""
+    run_id = uuid.uuid4().hex[:8]
+    remote_dir = f"{remote_work_dir}/{run_id}"
+
+    uploads: list[tuple[Path, str]] = []
+    uploads.append((netlist, f"{remote_dir}/{netlist.name}"))
+    for inc_file in params.get("include_files", []):
+        inc_path = Path(inc_file).resolve()
+        if inc_path.exists():
+            uploads.append((inc_path, f"{remote_dir}/{inc_path.name}"))
+
+    remote_raw_dir = f"{remote_dir}/{netlist.stem}.raw"
+    remote_log_file = f"{remote_dir}/spectre.out"
+    spectre_argv = _build_spectre_argv(
+        spectre_cmd=spectre_cmd,
+        spectre_args=list(spectre_args or []) + list(params.get("spectre_args", [])),
+        output_format=output_format,
+        netlist_path=f"{remote_dir}/{netlist.name}",
+        raw_dir=remote_raw_dir,
+        log_file=remote_log_file,
+    )
+    spectre_command = " ".join(shlex.quote(arg) for arg in spectre_argv)
+    logger.info("[remote] %s", spectre_command)
+    print(f"[Command] {spectre_command}")
+    print("[Exec] Remote simulation running...")
+
+    environment = cadence_env or CadenceEnvironment.from_env()
+    run_command = f"exec {spectre_command}"
+    mentor_script = os.environ.get("VB_MENTOR_CSHRC", "").strip()
+    if mentor_script:
+        run_command = CadenceEnvironment(mentor_script).wrap(run_command)
+    run_command = environment.wrap(run_command)
+    pid_file = f"{remote_dir}/spectre.pid"
+    exec_body = (
+        f"mkdir -p {shlex.quote(remote_raw_dir)} || exit $?; "
+        f"{run_command} & "
+        f'SPID=$!; echo "$SPID" > {shlex.quote(pid_file)}; wait "$SPID"'
+    )
+    exec_cmd = f"sh -c {shlex.quote(exec_body)}"
+
+    logger.info("[remote] %s", exec_cmd)
+    task = run_remote_task(
+        runner,
+        work_dir_base=remote_work_dir,
+        run_id=run_id,
+        uploads=uploads,
+        command=exec_cmd,
+        timeout=timeout,
+    )
+
+    if not task.success:
+        return _SpectreRunResult(
+            success=False, output_dir=None, returncode=-1,
+            stdout=task.stdout, stderr=task.stderr,
+            error=task.error or "Remote task failed",
+            metadata={
+                "timings": dict(task.timings),
+                "command": exec_cmd,
+                "spectre_command": spectre_command,
+            },
+        )
+
+    if task.returncode != 0:
+        stdout = (task.stdout or "").strip()
+        stderr = (task.stderr or "").strip()
+        if stdout or stderr:
+            print("[Simulation output]")
+            if stdout:
+                print(stdout)
+            if stderr:
+                print("[stderr]")
+                print(stderr)
+
+    def _cleanup_remote_run_dir() -> None:
+        if not keep_remote_files and task.remote_dir:
+            try:
+                runner.run_command(f"rm -rf {task.remote_dir}")
+                logger.debug("Cleaned up remote Spectre directory: %s", task.remote_dir)
+            except Exception:  # noqa: S110
+                logger.warning("Failed to clean up remote Spectre directory: %s", task.remote_dir)
+
+    try:
+        base_output_dir = Path(base_output_dir).resolve()
+        timings = dict(task.timings)
+        download_total = 0.0
+
+        started = time.perf_counter()
+        result_download = runner.download(remote_raw_dir, base_output_dir / f"{netlist.stem}.raw", recursive=True)
+        download_total += time.perf_counter() - started
+        if result_download.returncode != 0:
+            return _SpectreRunResult(
+                success=False,
+                output_dir=None,
+                returncode=result_download.returncode,
+                stdout=result_download.stdout,
+                stderr=result_download.stderr,
+                error=f"Failed to download remote raw results from {remote_raw_dir}: {result_download.stderr.strip()}",
+                metadata={
+                    "remote_host": runner.host,
+                    "timings": timings | {"download_total": download_total},
+                    "command": exec_cmd,
+                    "spectre_command": spectre_command,
+                },
+            )
+
+        for remote_name, local_name in (
+            ("spectre.out", "spectre.out"),
+            ("spectre.fc", "spectre.fc"),
+            ("spectre.ic", "spectre.ic"),
+        ):
+            started = time.perf_counter()
+            download_result = runner.download(f"{task.remote_dir}/{remote_name}", base_output_dir / local_name)
+            download_total += time.perf_counter() - started
+            if download_result.returncode != 0:
+                logger.debug("Skipping optional remote file %s: %s", remote_name, download_result.stderr.strip())
+        timings["download_total"] = download_total
+
+        output_dir = base_output_dir / f"{netlist.stem}.raw"
+        # Handle nested .raw/.raw from some spectre versions
+        nested_raw = output_dir / f"{netlist.stem}.raw"
+        if nested_raw.exists() and nested_raw.is_dir():
+            output_dir = nested_raw
+
+        return _SpectreRunResult(
+            success=True,
+            output_dir=output_dir,
+            returncode=task.returncode,
+            stdout=task.stdout,
+            stderr=task.stderr,
+            error=None,
+            metadata={
+                "remote_host": runner.host,
+                "timings": timings,
+                "command": exec_cmd,
+                "spectre_command": spectre_command,
+            },
+        )
+    finally:
+        _cleanup_remote_run_dir()
+
+# ---------------------------------------------------------------------------
+# Result assembly
+# ---------------------------------------------------------------------------
+
+def _build_simulation_result(
+    run_result: _SpectreRunResult,
+    output_format: str | None,
+    extra_metadata: dict[str, Any] | None = None,
+) -> SimulationResult:
+    """Scan stdout/stderr for errors/warnings, parse PSF data, build result."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    combined = (run_result.stdout or "") + "\n" + (run_result.stderr or "")
+    combined_lower = combined.lower()
+
+    # Classify errors into short, actionable messages
+    # "Circuit read-in complete" is normal Spectre output — only flag actual
+    # read-in *errors* which contain "error reading" or "read-in failed".
+    has_readin_error = (
+        ("error reading" in combined_lower or "read-in failed" in combined_lower)
+    )
+    if has_readin_error:
+        errors.append("netlist read error (missing include or syntax)")
+    elif "license" in combined_lower and ("error" in combined_lower or "denied" in combined_lower):
+        errors.append("license error")
+    elif _has_convergence_failure(combined):
+        errors.append("convergence failure")
+    elif "no such file" in combined_lower or "cannot open" in combined_lower:
+        errors.append("file not found")
+    elif "segmentation" in combined_lower or "core dump" in combined_lower:
+        errors.append("spectre crashed")
+    else:
+        # Fallback: collect raw error lines
+        for line in combined.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            lower = stripped.lower()
+            if "error" in lower and "0 errors" not in lower:
+                errors.append(stripped)
+
+    for line in combined.splitlines():
+        stripped = line.strip()
+        if stripped:
+            lower = stripped.lower()
+            if "warning" in lower and "0 warnings" not in lower:
+                warnings.append(stripped)
+
+    output_dir = run_result.output_dir
+    output_files = (
+        [str(f) for f in output_dir.rglob("*") if f.is_file()]
+        if output_dir and output_dir.exists()
+        else []
+    )
+
+    has_execution_failure = (
+        has_readin_error
+        or _has_convergence_failure(combined)
+        or _has_fatal_spectre_error(combined)
+    )
+    if run_result.returncode != 0 or has_execution_failure:
+        status = ExecutionStatus.PARTIAL if output_files else ExecutionStatus.FAILURE
+        if not errors:
+            errors.append(
+                f"exit code {run_result.returncode}"
+                if run_result.returncode != 0
+                else "Spectre reported a fatal error"
+            )
+    else:
+        status = ExecutionStatus.SUCCESS
+
+    data: dict[str, Any] = {}
+    sweep_data: dict[int, dict[str, Any]] = {}
+    if output_dir and output_dir.exists() and output_format == "psfascii":
+        data = parse_psf_ascii_directory(output_dir)
+        sweep_data = parse_sweep_psf_directory(output_dir)
+
+    metadata: dict[str, Any] = {
+        "returncode": run_result.returncode,
+        "output_dir": str(output_dir) if output_dir and output_dir.exists() else None,
+        "output_files": output_files,
+    }
+    if sweep_data:
+        # Per-point sweep results live in metadata to keep `data` flat
+        # for the common single-point caller.  Sweep-aware consumers
+        # check `result.metadata.get("sweep_points")` -- shape is
+        # `{point_index: {signal_name: [values]}, ...}`.
+        metadata["sweep_points"] = sweep_data
+    if extra_metadata:
+        metadata.update(extra_metadata)
+
+    return SimulationResult(
+        status=status,
+        data=data,
+        errors=errors,
+        warnings=warnings,
+        metadata=metadata,
+    )
+
+
+def _has_convergence_failure(output: str) -> bool:
+    """Match explicit convergence failures, not normal convergence chatter."""
+    lower = output.lower()
+    return (
+        "spcrtrf-15044" in lower
+        or "failed to converge" in lower
+        or "convergence failed" in lower
+        or "convergence failure" in lower
+    )
+
+
+def _has_fatal_spectre_error(output: str) -> bool:
+    """Identify fatal Spectre output even when a wrapper returns zero."""
+    lower = output.lower()
+    return (
+        "spectre terminated prematurely due to fatal error" in lower
+        or "fatal error" in lower
+        or bool(re.search(r"(?m)^\s*error\s*\(", output, re.IGNORECASE))
+    )
+
+# ---------------------------------------------------------------------------
+# SpectreSimulator
+# ---------------------------------------------------------------------------
+
+def _validate_max_workers(max_workers: int) -> int:
+    """Validate a user-supplied Spectre job concurrency limit."""
+    if (
+        not isinstance(max_workers, int)
+        or isinstance(max_workers, bool)
+        or max_workers < 1
+    ):
+        raise ValueError("max_workers must be at least 1")
+    return max_workers
+
+
+class SpectrePool:
+    """Explicitly owned pool for incremental asynchronous simulations.
+
+    Prefer :meth:`SpectreSimulator.run_parallel` for a fixed batch. Use this
+    class when simulations need to be submitted over time while earlier jobs
+    are still running. The context manager makes the executor lifetime and
+    concurrency limit explicit.
+    """
+
+    def __init__(
+        self,
+        simulator: "SpectreSimulator",
+        max_workers: int = DEFAULT_PARALLEL_WORKERS,
+    ) -> None:
+        self._simulator = simulator
+        self._max_workers = _validate_max_workers(max_workers)
+        self._executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        self._closed = False
+
+    @property
+    def max_workers(self) -> int:
+        """Maximum number of Spectre jobs that may run concurrently."""
+        return self._max_workers
+
+    def submit(
+        self,
+        netlist: Path,
+        params: dict | None = None,
+    ) -> Future[SimulationResult]:
+        """Submit one simulation and return its future immediately."""
+        if self._closed:
+            raise RuntimeError("SpectrePool has been shut down")
+        netlist = Path(netlist).resolve()
+        work_dir = self._simulator._new_parallel_work_dir(netlist)
+        return self._executor.submit(
+            self._simulator._run_in_work_dir,
+            netlist,
+            params or {},
+            work_dir,
+        )
+
+    def wait_all(
+        self,
+        futures: list[Future[SimulationResult]],
+    ) -> list[SimulationResult]:
+        """Wait for futures and return results in submission order."""
+        return self._simulator.wait_all(futures)
+
+    def shutdown(
+        self,
+        wait: bool = True,
+        *,
+        cancel_futures: bool = False,
+    ) -> None:
+        """Shut down this pool; subsequent submissions are rejected."""
+        if self._closed:
+            return
+        self._closed = True
+        self._executor.shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    def __enter__(self) -> "SpectrePool":
+        if self._closed:
+            raise RuntimeError("SpectrePool has been shut down")
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.shutdown()
+
+
+class SpectreSimulator:
+    """Cadence Spectre simulator adapter."""
+
+    def __init__(
+        self,
+        spectre_cmd: str = "spectre",
+        spectre_args: list[str] | tuple[str, ...] | None = None,
+        timeout: int = 600,
+        work_dir: Path | None = None,
+        output_format: str | None = "psfascii",
+        remote_host: str | None = None,
+        remote_user: str | None = None,
+        remote_work_dir: str | None = None,
+        jump_host: str | None = None,
+        jump_user: str | None = None,
+        ssh_key_path: Path | None = None,
+        ssh_config_path: Path | None = None,
+        keep_remote_files: bool = False,
+        remote: bool = False,
+        ssh_runner: SSHRunner | None = None,
+        profile: str | None = None,
+    ) -> None:
+        profile = resolve_profile(profile)
+        load_vb_env()
+        if spectre_cmd == "spectre":
+            suffix = f"_{profile}" if profile else ""
+            vb_bin = (
+                os.environ.get(f"VB_SPECTRE_BIN{suffix}", "").strip()
+                or os.environ.get("VB_SPECTRE_BIN", "").strip()
+            )
+            if vb_bin:
+                spectre_cmd = vb_bin
+        self._spectre_cmd = spectre_cmd
+        self._spectre_args = list(spectre_args or [])
+        self._timeout = timeout
+        self._work_dir = work_dir
+        self._output_format = output_format
+        self._ssh_key_path = ssh_key_path
+        self._ssh_config_path = ssh_config_path
+        self._keep_remote_files = keep_remote_files
+        # Compatibility only. New code should use run_parallel() for a batch
+        # or parallel_pool() for incremental submission.
+        self._legacy_max_workers = DEFAULT_PARALLEL_WORKERS
+        self._legacy_pool: SpectrePool | None = None
+        self._ssh_runner: SSHRunner | None = ssh_runner
+        self._profile = profile
+        self._ssh_backend: str | None = None
+        self._ssh_max_sessions: int | None = None
+        self._ssh_proxy_url: str | None = None
+
+        rh, ru, jh, ju = remote_host, remote_user, jump_host, jump_user
+        if remote:
+            roles = remote_host_roles_from_os(profile, load=False)
+            backend_env = ssh_backend_env_from_os(profile)
+            self._ssh_backend = backend_env.backend
+            self._ssh_max_sessions = backend_env.max_sessions
+            self._ssh_proxy_url = ssh_proxy_url_from_os(profile)
+            if rh is None:
+                rh = roles.spectre_host
+            if ru is None:
+                ru = roles.remote_user
+            if jh is None:
+                jh = roles.jump_for(rh)
+            if ju is None:
+                ju = roles.jump_user
+
+        self._remote_host = rh
+        self._remote_user = ru
+        self._jump_host = jh
+        self._jump_user = ju
+        self._remote_work_dir_set = remote_work_dir is not None
+        self._remote_work_dir = remote_work_dir
+
+    # -- factory methods ----------------------------------------------------
+
+    @classmethod
+    def from_env(
+        cls,
+        spectre_cmd: str = "spectre",
+        spectre_args: list[str] | tuple[str, ...] | None = None,
+        timeout: int = 600,
+        work_dir: Path | None = None,
+        output_format: str | None = "psfascii",
+        keep_remote_files: bool = False,
+        ssh_runner: SSHRunner | None = None,
+        profile: str | None = None,
+    ) -> "SpectreSimulator":
+        """Create a SpectreSimulator from environment variables.
+
+        If the configured remote host is localhost (or unset with a localhost
+        env var), returns a local simulator. Otherwise it uses the selected
+        OpenSSH or Paramiko backend. Raises RuntimeError if the bridge tunnel
+        lifecycle state is unavailable.
+        """
+        profile = resolve_profile(profile)
+        load_vb_env()
+        # Check if we should run locally
+        roles = remote_host_roles_from_os(profile, load=False)
+        remote_host = roles.spectre_host or ""
+        if remote_host and _is_localhost(remote_host):
+            return cls(
+                spectre_cmd=spectre_cmd,
+                spectre_args=spectre_args,
+                timeout=timeout,
+                work_dir=work_dir,
+                output_format=output_format,
+                keep_remote_files=keep_remote_files,
+                profile=profile,
+            )
+
+        if ssh_runner is None:
+            from virtuoso_bridge.transport.tunnel import SSHClient
+            if SSHClient.is_running(profile):
+                ssh_client = SSHClient.from_env(
+                    keep_remote_files=keep_remote_files,
+                    profile=profile,
+                )
+                ssh_runner = getattr(
+                    ssh_client,
+                    "spectre_runner",
+                    getattr(ssh_client, "ssh_runner", None),
+                )
+
+        return cls(
+            spectre_cmd=spectre_cmd,
+            spectre_args=spectre_args,
+            timeout=timeout,
+            work_dir=work_dir,
+            output_format=output_format,
+            keep_remote_files=keep_remote_files,
+            remote=True,
+            ssh_runner=ssh_runner,
+            profile=profile,
+        )
+
+    @classmethod
+    def local(
+        cls,
+        spectre_cmd: str = "spectre",
+        spectre_args: list[str] | tuple[str, ...] | None = None,
+        timeout: int = 600,
+        work_dir: Path | None = None,
+        output_format: str | None = "psfascii",
+    ) -> "SpectreSimulator":
+        """Create a SpectreSimulator for local execution (no SSH)."""
+        return cls(
+            spectre_cmd=spectre_cmd,
+            spectre_args=spectre_args,
+            timeout=timeout,
+            work_dir=work_dir,
+            output_format=output_format,
+        )
+
+    # -- public API ---------------------------------------------------------
+
+    def run_simulation(self, netlist: Path, params: dict | None = None) -> SimulationResult:
+        """Run a Spectre simulation on *netlist* synchronously."""
+        netlist = Path(netlist).resolve()
+        params = params or {}
+        return self._run_in_work_dir(netlist, params, self._work_dir)
+
+    def _run_in_work_dir(
+        self,
+        netlist: Path,
+        params: dict,
+        work_dir: Path | None,
+    ) -> SimulationResult:
+        """Run one resolved netlist using the provided local work directory."""
+        if not netlist.exists():
+            return SimulationResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Netlist file not found: {netlist}"],
+            )
+        if self._remote_host:
+            return self._run_remote(netlist, params, work_dir=work_dir)
+        return self._run_local(netlist, params, work_dir=work_dir)
+
+    def _new_parallel_work_dir(self, netlist: Path) -> Path:
+        """Reserve a collision-free local workspace path for one parallel task."""
+        base_dir = (
+            Path(self._work_dir)
+            if self._work_dir is not None
+            else artifact_dir("spectre")
+        )
+        return base_dir / f"{netlist.stem}__{uuid.uuid4().hex[:8]}"
+
+    # -- parallel simulation API ---------------------------------------------
+
+    def parallel_pool(
+        self,
+        max_workers: int = DEFAULT_PARALLEL_WORKERS,
+    ) -> SpectrePool:
+        """Create an explicitly owned pool for incremental submissions.
+
+        Use it as a context manager so all submitted work finishes and the
+        executor is released deterministically::
+
+            with sim.parallel_pool(max_workers=4) as pool:
+                first = pool.submit(Path("tb_comparator.scs"))
+                second = pool.submit(Path("tb_dac.scs"))
+                results = pool.wait_all([first, second])
+        """
+        return SpectrePool(self, max_workers=max_workers)
+
+    def set_max_workers(self, n: int) -> None:
+        """Set concurrency for the deprecated simulator-level submit API.
+
+        New code should pass ``max_workers`` to :meth:`run_parallel` or
+        :meth:`parallel_pool`. The compatibility pool cannot be resized after
+        its first submission; call :meth:`shutdown` before changing it.
+        """
+        warnings.warn(
+            "SpectreSimulator.set_max_workers() is deprecated; pass "
+            "max_workers to run_parallel() or parallel_pool() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        n = _validate_max_workers(n)
+        if self._legacy_pool is not None and n != self._legacy_max_workers:
+            raise RuntimeError(
+                "Cannot resize an active compatibility pool; call shutdown() "
+                "first or use parallel_pool(max_workers=...)"
+            )
+        self._legacy_max_workers = n
+
+    def submit(
+        self,
+        netlist: Path,
+        params: dict | None = None,
+    ) -> Future[SimulationResult]:
+        """Submit through the deprecated simulator-owned compatibility pool."""
+        warnings.warn(
+            "SpectreSimulator.submit() is deprecated; submit through "
+            "an explicit parallel_pool() context instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self._legacy_pool is None:
+            self._legacy_pool = self.parallel_pool(
+                max_workers=self._legacy_max_workers,
+            )
+        return self._legacy_pool.submit(netlist, params)
+
+    def shutdown(self) -> None:
+        """Release the deprecated simulator-owned compatibility pool."""
+        if self._legacy_pool is None:
+            return
+        self._legacy_pool.shutdown()
+        self._legacy_pool = None
+
+    def run_parallel(
+        self,
+        tasks: list[tuple[Path, dict]],
+        max_workers: int = DEFAULT_PARALLEL_WORKERS,
+    ) -> list[SimulationResult]:
+        """Run one fixed batch with a scoped executor.
+
+        Each call owns its executor, so batches with different concurrency
+        limits cannot leak state into one another. For incremental submission,
+        use :meth:`parallel_pool`.
+        """
+        _validate_max_workers(max_workers)
+        if not tasks:
+            return self.wait_all([])
+        with self.parallel_pool(max_workers=max_workers) as pool:
+            futures = [
+                pool.submit(Path(netlist), params)
+                for netlist, params in tasks
+            ]
+            return pool.wait_all(futures)
+
+    @staticmethod
+    def wait_all(futures: list[Future[SimulationResult]]) -> list[SimulationResult]:
+        """Wait for all futures and return results in submission order.
+
+        Failed simulations return an error result rather than raising.
+        """
+        results: list[SimulationResult] = []
+        for i, future in enumerate(futures):
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                results.append(SimulationResult(
+                    status=ExecutionStatus.ERROR,
+                    errors=[f"Task {i} failed: {exc}"],
+                ))
+        passed = sum(1 for r in results if r.status == ExecutionStatus.SUCCESS)
+        print(f"[parallel] Done: {passed}/{len(results)} succeeded")
+        return results
+
+    def check_license(self) -> dict[str, Any]:
+        """Check Spectre license availability on the remote host.
+
+        Returns a dict with keys: ok, spectre_path, version, licenses.
+        """
+        is_local = not self._remote_host or _is_localhost(self._remote_host)
+        environment = CadenceEnvironment.from_env(self._profile)
+        if is_local and not environment.script:
+            # Local mode: check spectre directly on this machine
+            info: dict[str, Any] = {
+                "ok": False,
+                "spectre_path": None,
+                "version": None,
+                "licenses": [],
+            }
+            spectre_path = shutil.which(self._spectre_cmd)
+            if spectre_path:
+                info["spectre_path"] = spectre_path
+                info["ok"] = True
+                try:
+                    ver = subprocess.run(
+                        [self._spectre_cmd, "-V"],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    ver_line = (ver.stdout or ver.stderr or "").strip().splitlines()
+                    if ver_line:
+                        info["version"] = ver_line[0]
+                except Exception:
+                    pass
+                try:
+                    lm = subprocess.run(
+                        ["lmstat", "-a"],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    for line in (lm.stdout or "").splitlines():
+                        if "Users of" in line:
+                            info["licenses"].append(line.strip())
+                except Exception:
+                    pass
+            else:
+                info["error"] = f"Spectre command '{self._spectre_cmd}' not found locally"
+            return info
+
+        runner = None if is_local else self._get_ssh_runner()
+
+        suffix = f"_{self._profile}" if self._profile else ""
+        spectre_bin = (
+            os.environ.get(f"VB_SPECTRE_BIN{suffix}", "").strip()
+            or os.environ.get("VB_SPECTRE_BIN", "").strip()
+        )
+
+        if spectre_bin:
+            quoted_bin = shlex.quote(spectre_bin)
+            path_command = f"printf 'SPECTRE_PATH=%s\\n' {quoted_bin}"
+            ver_cmd = f"{quoted_bin} -V"
+        else:
+            path_command = 'printf "SPECTRE_PATH=%s\\n" "$(which spectre 2>/dev/null || echo NOTFOUND)"'
+            ver_cmd = "spectre -V"
+
+        check_script = environment.wrap(
+            f'{path_command}; '
+            f'{ver_cmd} 2>&1 | head -1; '
+            'lmstat -a 2>/dev/null | grep -E "Users of" | grep "licenses in use" | grep -v "0 licenses in use"'
+        )
+
+        result = (
+            subprocess.run(["sh", "-c", check_script], capture_output=True, text=True, timeout=30)
+            if runner is None else runner.run_command(check_script, timeout=30)
+        )
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+
+        info: dict[str, Any] = {
+            "ok": False,
+            "spectre_path": None,
+            "version": None,
+            "raw_output": stdout,
+            "stderr": stderr,
+            "licenses": [],
+        }
+
+        for line in stdout.splitlines():
+            line = line.strip()
+            if line.startswith("SPECTRE_PATH="):
+                path = line.split("=", 1)[1]
+                if path != "NOTFOUND":
+                    info["spectre_path"] = path
+            elif line.startswith("@(#)$CDS:"):
+                info["version"] = line
+            elif "Users of" in line:
+                info["licenses"].append(line)
+
+        if info["spectre_path"]:
+            info["ok"] = True
+
+        return info
+
+    # -- private helpers ----------------------------------------------------
+
+    def _run_local(
+        self,
+        netlist: Path,
+        params: dict,
+        *,
+        work_dir: Path | None,
+    ) -> SimulationResult:
+        run_result = _run_spectre_local(
+            netlist=netlist,
+            params=params,
+            spectre_cmd=self._spectre_cmd,
+            spectre_args=self._spectre_args,
+            timeout=self._timeout,
+            work_dir=work_dir,
+            output_format=self._output_format,
+            cadence_env=CadenceEnvironment.from_env(self._profile),
+        )
+        if not run_result.success:
+            return SimulationResult(
+                status=ExecutionStatus.ERROR,
+                errors=[run_result.error or "Spectre execution failed"],
+            )
+        return _build_simulation_result(run_result, self._output_format)
+
+    def _get_ssh_runner(self) -> SSHRunner:
+        if self._ssh_runner is None:
+            self._ssh_runner = SSHRunner(
+                host=self._remote_host,  # type: ignore[arg-type]
+                user=self._remote_user,
+                jump_host=self._jump_host,
+                jump_user=self._jump_user,
+                ssh_key_path=self._ssh_key_path,
+                ssh_config_path=self._ssh_config_path,
+                timeout=self._timeout,
+                persistent_shell=True,
+                backend=self._ssh_backend,
+                max_sessions=self._ssh_max_sessions,
+                proxy_url=self._ssh_proxy_url,
+                verbose=True,
+            )
+        return self._ssh_runner
+
+    def _run_remote(
+        self,
+        netlist: Path,
+        params: dict,
+        *,
+        work_dir: Path | None,
+    ) -> SimulationResult:
+        runner = self._get_ssh_runner()
+        timings: dict[str, float] = {}
+        overall_started = time.perf_counter()
+
+        if not self._remote_work_dir_set:
+            username = resolve_remote_username(
+                configured_user=self._remote_user or runner.user,
+                runner=runner,
+            )
+            self._remote_work_dir = default_remote_spectre_work_dir(
+                username,
+                resolve_client_id(self._profile),
+            )
+            logger.info("Remote work dir: %s", self._remote_work_dir)
+        if self._remote_work_dir is None:
+            return SimulationResult(
+                status=ExecutionStatus.ERROR,
+                errors=["Remote work dir is not configured"],
+            )
+
+        base_output_dir = (
+            Path(work_dir)
+            if work_dir is not None
+            else artifact_dir("spectre", netlist.stem)
+        )
+        base_output_dir.mkdir(parents=True, exist_ok=True)
+        run_result = _run_spectre_remote(
+            netlist=netlist,
+            params=params,
+            runner=runner,
+            remote_work_dir=self._remote_work_dir,
+            base_output_dir=base_output_dir,
+            spectre_cmd=self._spectre_cmd,
+            spectre_args=self._spectre_args,
+            output_format=self._output_format,
+            timeout=self._timeout,
+            keep_remote_files=self._keep_remote_files,
+            cadence_env=CadenceEnvironment.from_env(self._profile),
+        )
+        if not run_result.success:
+            return SimulationResult(
+                status=ExecutionStatus.ERROR,
+                errors=[run_result.error or "Remote Spectre execution failed"],
+                metadata=run_result.metadata,
+            )
+        timings.update(run_result.metadata.get("timings", {}))
+        parse_started = time.perf_counter()
+        result = _build_simulation_result(
+            run_result,
+            self._output_format,
+            extra_metadata={
+                "remote_host": self._remote_host,
+                "timings": timings,
+                "command": run_result.metadata.get("command"),
+                "spectre_command": run_result.metadata.get("spectre_command"),
+            },
+        )
+        timings["parse_results"] = time.perf_counter() - parse_started
+        timings["total"] = time.perf_counter() - overall_started
+        result.metadata["timings"] = timings
+        return result

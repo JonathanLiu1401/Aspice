@@ -4,8 +4,8 @@
     python <aspice>/scripts/verify.py LIB CELL --steps drc,lvs,pex,post --corners typical,rcworst \
         --testbench tb_CELL.sp [--cds-lib ./cds.lib] [--env ./.env] [--json]
 
-Runs with the Python that has virtuoso_bridge (bridge-lite) installed; settings (VB_PV_*, VB_QRC_CORNERS) come from
-the bridge's .env. See references/verify.md.
+Uses the vendored virtuoso-bridge-lite in third_party/ unless that package is already
+installed. Settings (VB_PV_*, VB_QRC_CORNERS) come from the bridge's .env. See references/verify.md.
 """
 import argparse
 import sys

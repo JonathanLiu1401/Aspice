@@ -12,14 +12,14 @@ Hard rules:
    lines for that spec, and `python <aspice>/scripts/verify.py LIB CELL --steps drc,lvs,pex,post`
    runs on it before the block is instantiated anywhere else.
 2. Post-layout target: each key measure within **10 %** of the schematic value at the
-   typical corner, and the spec still met at the worst corner. If not, **fix the layout**
-   (placement, wire length, width, shielding, symmetry), re-save, re-run verify. Repeat.
+   typical corner, and the spec still met at the worst corner. If not, change the
+   generator (`layout_<cell>.py`: placement, wire length, width, shielding, symmetry)
+   and regenerate. Do not nudge shapes and re-save. A layout found by repeated
+   hand edits is a failed method even if the last run meets the numbers.
 3. Do not hide a post-layout gap by re-sizing devices only in the schematic. If you do
-   resize, re-run the schematic checks AND the layout loop; the two must agree.
-4. Report the pre/post table of the final iteration (and how many iterations it took)
-   in your result file. Numbers must come from `verify`, not estimates.
-5. Follow the layout guidelines below while drawing; they are what makes rule 2 converge
-   in one or two iterations instead of ten.
+   resize, re-run the schematic checks and regenerate the layout; the two must agree.
+4. Report the pre/post table from `verify`, not estimates, and what the generator change was.
+5. The procedure is `AGENTS.md`. The geometric checklist is `references/layout-guidelines.md`.
 
 ## Command
 
@@ -98,6 +98,7 @@ Routing
 Pins
 - Pin shapes on the routing layer at block edges, with names exactly as in the schematic.
 
-When post-layout misses the target, read the extracted netlist: sum the coupling and
-ground caps per net (largest first) and the largest resistors; the worst nets tell you
-what to move or widen.
+When post-layout misses the target, run `scripts/netbrief.py pex` on the extracted file.
+It reports capacitance in fF and the largest resistor segment, not a sum across the
+supply mesh. Change the generator from that list and regenerate. Do not open the
+extracted deck.

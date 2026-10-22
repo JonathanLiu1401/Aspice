@@ -11,8 +11,14 @@ failure (no PEX without LVS MATCH, no post-layout run without PEX).
 
 from __future__ import annotations
 
+import sys
 import time
 from pathlib import Path
+
+# Vendored bridge, used only when virtuoso_bridge is not already installed.
+_VENDOR = Path(__file__).resolve().parents[2] / 'third_party' / 'virtuoso-bridge-lite' / 'src'
+if _VENDOR.is_dir() and str(_VENDOR) not in sys.path:
+    sys.path.append(str(_VENDOR))
 
 from aspverify.config import VerifyConfig
 from aspverify.flow import (

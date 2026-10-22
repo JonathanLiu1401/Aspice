@@ -34,32 +34,64 @@ import tempfile
 import time
 from pathlib import Path
 
-DOMAIN = '.ece.uw.edu'
-DEFAULT_HOSTS = ['linux-lab-%d' % n for n in range(136, 146)]
-REMOTE_PY = '~/.claude/skills-venv/bin/python'
-REMOTE_ASPICE = '~/.claude/skills/aspice'
 REMOTE_ROOT = '/var/tmp/$USER/aspice-remote'   # host-local disk, never NFS
 TEXT_EXT = {'.scs', '.sp', '.spi', '.spice', '.cir', '.inc', '.lib', '.va', '.vams',
             '.txt', '.net', '.cdl', '.ocn', '.il'}
 
-KITS = '/home/lab.apps/vlsiapps_new/kits'
-FREEPDK45 = '/home/projects/ee476/common/freepdk45_opencelllibrarypdk45/FreePDK45'
-PDKS = [
-    # name, include line, corners, core devices
-    ('gpdk045', f'include "{KITS}/gpdk045_v_6_0/models/spectre/gpdk045.scs" section=tt',
-     'tt ff ss fs sf mc (+ _hvt/_lvt/_18 variants)', 'nch pch nch_hvt pch_lvt nch18 ... (1.0 V core)'),
-    ('gpdk090', f'include "{KITS}/gpdk090_v4.6/models/spectre/gpdk090.scs" section=NN',
-     'NN SS SF FS FF (+ _highperf), stat_mis', 'gpdk090_nmos1v gpdk090_pmos1v gpdk090_nmos2v ...'),
-    ('gpdk180', f'include "{KITS}/gpdk180_v3.3/models/spectre/gpdk.scs" section=NN',
-     'NN SS SF FS FF stat', 'nmos1 pmos1 (1.8 V), nmos25 pmos25 (3.3 V)'),
-    ('sky130', f'include "{KITS}/sky130_release_0.0.1/models/sky130.lib.spice" section=tt',
-     'tt ss ff sf fs', 'sky130_fd_pr__nfet_01v8 / __pfet_01v8 (subckts; instance them with X)'),
-    # hspice_nom.include itself is unusable in Spectre (unterminated quotes):
-    # include the per-device cards; corners are directories models_nom/_ss/_ff.
-    ('freepdk45', f'include "{FREEPDK45}/ncsu_basekit/models/hspice/tran_models/models_nom/NMOS_VTG.inc"',
-     'directories models_nom / models_ss / models_ff; include one file per device (PMOS_VTG.inc too)',
-     'NMOS_VTG PMOS_VTG NMOS_VTL NMOS_VTH NMOS_THKOX (SPICE syntax: wrap in simulator lang=spice)'),
-]
+
+def _site(key, default=''):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
+    import site_env
+    return site_env.get(key, default)
+
+
+def lab_hosts():
+    return [h for h in _site('ASPICE_LAB_HOSTS').split() if h]
+
+
+def _need_hosts():
+    hosts = lab_hosts()
+    if not hosts:
+        raise SystemExit('No lab hosts. Set ASPICE_LAB_HOSTS, or ASPICE_SITE=uw '
+                         '(references/sites/uw.env), or copy that file for your site.')
+    return hosts
+
+
+def lab_domain():
+    return _site('ASPICE_LAB_DOMAIN')
+
+
+def remote_python():
+    return _site('ASPICE_REMOTE_PYTHON', 'python3')
+
+
+def remote_aspice():
+    return _site('ASPICE_REMOTE_ASPICE', '~/.claude/skills/aspice')
+
+
+def pdk_table():
+    """Include lines for the selected site. Empty until ASPICE_SITE or ASPICE_KIT_ROOT is set."""
+    kits = _site('ASPICE_KIT_ROOT')
+    freepdk = _site('ASPICE_FREEPDK45')
+    rows = []
+    if kits:
+        rows += [
+            ('gpdk045', 'include "%s/gpdk045_v_6_0/models/spectre/gpdk045.scs" section=tt' % kits,
+             'tt ff ss fs sf mc (+ _hvt/_lvt/_18 variants)', 'nch pch nch_hvt pch_lvt nch18 ... (1.0 V core)'),
+            ('gpdk090', 'include "%s/gpdk090_v4.6/models/spectre/gpdk090.scs" section=NN' % kits,
+             'NN SS SF FS FF (+ _highperf), stat_mis', 'gpdk090_nmos1v gpdk090_pmos1v gpdk090_nmos2v ...'),
+            ('gpdk180', 'include "%s/gpdk180_v3.3/models/spectre/gpdk.scs" section=NN' % kits,
+             'NN SS SF FS FF stat', 'nmos1 pmos1 (1.8 V), nmos25 pmos25 (3.3 V)'),
+            ('sky130', 'include "%s/sky130_release_0.0.1/models/sky130.lib.spice" section=tt' % kits,
+             'tt ss ff sf fs', 'sky130_fd_pr__nfet_01v8 / __pfet_01v8 (subckts; instance them with X)'),
+        ]
+    if freepdk:
+        # hspice_nom.include itself is unusable in Spectre (unterminated quotes).
+        rows.append(
+            ('freepdk45', 'include "%s/ncsu_basekit/models/hspice/tran_models/models_nom/NMOS_VTG.inc"' % freepdk,
+             'directories models_nom / models_ss / models_ff; include one file per device (PMOS_VTG.inc too)',
+             'NMOS_VTG PMOS_VTG NMOS_VTL NMOS_VTH NMOS_THKOX (SPICE syntax: wrap in simulator lang=spice)'))
+    return rows
 
 # Tolerances injected as an options statement before the first analysis.
 ACCURACY = {
@@ -78,7 +110,8 @@ INCLUDE_RE = re.compile(r'^(\s*(?:include|ahdl_include|\.include|\.inc|\.lib|\.h
 
 class Remote:
     def __init__(self, host, user=None, jump=None, timeout=30):
-        self.host = host if '.' in host or host == 'localhost' else host + DOMAIN
+        domain = lab_domain()
+        self.host = host if '.' in host or host == 'localhost' or not domain else host + domain
         self.user, self.jump, self.timeout = user, jump, timeout
 
     @property
@@ -223,7 +256,7 @@ def cmd_run(a):
     if not deck.is_file():
         sys.exit(f'no such netlist: {deck}')
     if a.host in (None, 'auto'):
-        rows = rank_hosts(a.hosts or DEFAULT_HOSTS, a.user, a.jump)
+        rows = rank_hosts(a.hosts or _need_hosts(), a.user, a.jump)
         good = [d for d in rows if d['ok']]
         if not good:
             print_hosts(rows)
@@ -248,9 +281,9 @@ def cmd_run(a):
         rdir = r.bash(f'd={REMOTE_ROOT}/{jid}; mkdir -p "$d" && echo "$d"').stdout.strip()
         r.put_dir(tmp, rdir)
 
-    serve = [REMOTE_PY, f'{rdir}/lab_run.py', 'serve', rdir, '--deck', deck_name,
+    serve = [remote_python(), f'{rdir}/lab_run.py', 'serve', rdir, '--deck', deck_name,
              '--accuracy', a.accuracy, '--timeout', str(a.timeout),
-             '--aspice', REMOTE_ASPICE]
+             '--aspice', remote_aspice()]
     if a.verify:
         serve.append('--verify')
     for s in a.spectre_arg or []:
@@ -451,9 +484,13 @@ def compare(base, tight):
 
 def cmd_serve(a):
     d = Path(a.dir).resolve()
+    if not a.aspice:
+        a.aspice = remote_aspice()
     sys.path.insert(0, str(Path(os.path.expanduser(a.aspice)) / 'lib'))
     os.environ.setdefault('ASPICE_WORKDIR', str(d / 'work'))
-    os.environ.setdefault('PDK_DIR', FREEPDK45)      # FreePDK45 model files use $PDK_DIR
+    freepdk = _site('ASPICE_FREEPDK45')
+    if freepdk:
+        os.environ.setdefault('PDK_DIR', freepdk)      # FreePDK45 model files use $PDK_DIR
     import cadence as CD
     _set_status(d, phase='preparing')
     deck_dir = d / 'deck'
@@ -542,11 +579,14 @@ def cmd_serve(a):
 # --------------------------------------------------------------------- CLI
 
 def cmd_pdks(a):
-    for name, inc, corners, devs in PDKS:
+    table = pdk_table()
+    if not table:
+        raise SystemExit('No kits. Set ASPICE_KIT_ROOT, or ASPICE_SITE=uw.')
+    for name, inc, corners, devs in table:
         print(f'{name}\n  {inc}\n  corners: {corners}\n  devices: {devs}')
     if a.check:
         r = Remote(a.check, a.user, a.jump)
-        paths = [re.search(r'"([^"]+)"', p[1]).group(1) for p in PDKS]
+        paths = [re.search(r'"([^"]+)"', p[1]).group(1) for p in table]
         p = r.bash('\n'.join(f'test -f {shlex.quote(x)} && echo OK {x} || echo MISSING {x}'
                              for x in paths))
         print(p.stdout)
@@ -591,11 +631,11 @@ def main(argv=None):
     p.add_argument('--verify', action='store_true')
     p.add_argument('--spectre-arg', action='append')
     p.add_argument('--timeout', type=int, default=7 * 86400)
-    p.add_argument('--aspice', default=REMOTE_ASPICE)
+    p.add_argument('--aspice', default=None)
     a = ap.parse_args(argv)
 
     if a.cmd == 'hosts':
-        print_hosts(rank_hosts(a.hosts or DEFAULT_HOSTS, a.user, a.jump))
+        print_hosts(rank_hosts(a.hosts or _need_hosts(), a.user, a.jump))
     elif a.cmd == 'pdks':
         cmd_pdks(a)
     elif a.cmd == 'run':
