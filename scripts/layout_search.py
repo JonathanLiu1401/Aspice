@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 KB = ROOT / 'references' / 'layout-kb'
 INDEX = KB / 'index.json'
 OLLAMA = 'http://127.0.0.1:11434'
-MODEL = 'nomic-embed-text'
+MODEL = 'qwen3-embedding:8b'
 
 
 def cards():
