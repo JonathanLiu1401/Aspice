@@ -34,6 +34,15 @@ class T(unittest.TestCase):
         # C1 and C3 both land on top (2 fF + 1 fF) plus coupling C2 (1 fF) counted on both ends
         self.assertIn('top', text)
         self.assertRegex(text, r'top\s+4\.00 fF')
+        self.assertIn('nmos x1', text)
+        self.assertIn('max', text)
+        self.assertNotIn('43208', text)
+
+    def test_mesh_r_is_max_segment_not_the_sum(self):
+        text = NB.pex_brief(
+            'R1 a a#1 10\nR2 a#1 a#2 100\nR3 a a#3 5\nC1 a 0 1e-15\n', top=5)
+        self.assertRegex(text, r'a\s+1\.00 fF\s+3 segs\s+max\s+100\.0 ohm')
+        self.assertNotIn('115.0', text)
 
     def test_scs_is_an_outline(self):
         text = NB.scs_brief(SCS)

@@ -9,8 +9,8 @@ auto-layout button. The agent writes the generator. The code under `lib/` checks
 step and keeps netlists small enough to fit in a context window. The rules the agent
 must follow are [`AGENTS.md`](AGENTS.md) (loaded from [`CLAUDE.md`](CLAUDE.md)).
 
-The benchmark that runs those agents lives outside this repo, in `~/EMiT/virtuoso-mcp-eval`.
-The two layout papers the method is built on are in `~/EMiT/papers/` (LAYGO, BAG3++).
+The benchmark that runs those agents is a separate repository, not part of this package.
+The layout method follows LAYGO (DOI 10.1109/TCSI.2020.3046524) and BAG3++ (DOI 10.1109/OJCAS.2024.3502641). Those papers are not redistributed here.
 The flow those papers and [laygo2](https://laygo2.github.io/overview.html) describe is
 implemented here by `lib/laygrid.py`.
 

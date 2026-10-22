@@ -98,6 +98,7 @@ The flow is laygo2's: templates on a placement grid, wires on a routing grid
 
 ## 6. When post-layout misses
 
-Read verify's worst-net list (coupling + ground cap per net, largest resistors): move or
-widen what it names, re-save, re-run. Iterate on the critical cell alone (short testbench),
-not on the whole chip.
+Read verify's worst-net summary, or `scripts/netbrief.py pex` (capacitance in fF, largest
+R segment and segment count, not the sum of a supply mesh). Change the floorplan or the
+wire budget in `layout_<cell>.py` and regenerate. Do not nudge shapes in the database.
+Re-extract that leaf once, on a short testbench, not the whole chip.

@@ -6,13 +6,14 @@
 
 Keyword search always works. If references/layout-kb/index.json exists and ollama is
 running with the same embedding model, semantic rank is added. The cards are original
-notes citing the textbooks and the papers in ~/EMiT/papers; they are not the books.
+notes citing the textbooks and the LAYGO / BAG3++ papers; they are not the books.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import os
 import re
 import sys
 import urllib.error
@@ -79,8 +80,23 @@ def build(model=MODEL):
     for card in cards():
         vec = embed(card['title'] + '\n' + card['text'], model=model)
         rows.append({**card, 'vector': vec})
-    INDEX.write_text(json.dumps({'model': model, 'cards': rows}))
+    _write_index({'model': model, 'cards': rows})
     print('wrote %s (%d cards, model %s)' % (INDEX, len(rows), model))
+
+
+def _write_index(payload):
+    """Replace the index atomically so a reader never sees a truncated file."""
+    tmp = INDEX.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(payload))
+    os.replace(tmp, INDEX)
+
+
+def _load_index():
+    """The parsed index, or None if it is missing or mid-write. Keyword search still runs."""
+    try:
+        return json.loads(INDEX.read_text())
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
 
 
 def search(query, k=4):
@@ -88,8 +104,8 @@ def search(query, k=4):
     kw = keyword_scores(query, rows)
     sem = [0.0] * len(rows)
     how = 'keyword'
-    if INDEX.is_file():
-        idx = json.loads(INDEX.read_text())
+    idx = _load_index()
+    if idx is not None:
         by_id = {c['id']: c.get('vector') for c in idx.get('cards', [])}
         try:
             qv = embed(query, model=idx.get('model', MODEL))

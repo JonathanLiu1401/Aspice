@@ -117,5 +117,5 @@ frame, hierarchy intact, regenerable from the script.
 | Sign-off command | `references/verify.md` |
 | Operating point | `references/opcheck.md` |
 
-Technique cards cite the books and the two papers in `~/EMiT/papers/`. They are notes,
+Technique cards cite the books and the LAYGO and BAG3++ papers (DOIs in `references/layout-kb/SOURCES.md`). They are notes,
 not the books. The techfile wins over a card when a number disagrees.

@@ -1,0 +1,1951 @@
+"""VirtuosoClient – Python client for Virtuoso SKILL execution."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+import errno
+import json
+import logging
+import math
+import os
+import re
+import secrets
+import socket
+import hashlib
+import time
+from pathlib import Path
+from typing import Any, Optional
+
+from virtuoso_bridge.env import load_vb_env
+from virtuoso_bridge import daemon_auth
+from virtuoso_bridge.profile import resolve_profile
+from virtuoso_bridge.virtuoso.basic.composition import compose_skill_script
+from virtuoso_bridge.models import ExecutionStatus, VirtuosoInterface, VirtuosoResult
+from virtuoso_bridge.virtuoso.ops import (
+    close_current_cellview as op_close_current_cellview,
+    default_view_type_for,
+    escape_skill_string,
+    open_cell_view as op_open_cell_view,
+    open_window as op_open_window,
+    save_current_cellview as op_save_current_cellview,
+)
+from virtuoso_bridge.virtuoso.layout import LayoutOps
+from virtuoso_bridge.virtuoso.library import LibraryOps
+from virtuoso_bridge.virtuoso.schematic import SchematicOps
+from virtuoso_bridge.virtuoso.symbol import SymbolOps
+
+logger = logging.getLogger(__name__)
+
+_STX = "\x02"
+_NAK = "\x15"
+_RECV_BUF_SIZE = 1024 * 1024
+_TUNNEL_CONNECT_RETRY_DELAY = 0.2
+_TUNNEL_CONNECT_GRACE_SECONDS = 3.0
+
+
+def _default_remote_port(
+    username: str | None = None, *, environ: Mapping[str, str] | None = None,
+) -> int:
+    """Return a stable per-user default port in the range 65000-65499.
+
+    SHA-1 based: the previous ``sum(ord(c)) % 500`` assigned identical ports
+    to any anagram pair (and collided often on shared EDA hosts), which made
+    cross-user daemon squatting trivial.  Deployment-time occupancy probing
+    (SSHClient.ensure_remote_setup) additionally shifts away ports already
+    held by another user.
+    """
+    values = os.environ if environ is None else environ
+    user = username or values.get("VB_REMOTE_USER", "").strip()
+    if not user:
+        return 65432
+    digest = hashlib.sha1(user.encode("utf-8")).hexdigest()
+    return 65000 + (int(digest[:8], 16) % 500)
+
+
+def _path_to_posix(path: str | Path) -> str:
+    return Path(path).as_posix()
+
+
+def _acquire_daemon_token(ssh: Any) -> str | None:
+    """Token for the daemon behind *ssh* (SSH-fetched) or the local machine.
+
+    The token is the SSH-bootstrapped shared secret gating the daemon
+    (see :mod:`virtuoso_bridge.daemon_auth`).  Fails FATAL by default: an
+    unavailable token raises :class:`daemon_auth.DaemonTokenError` instead of
+    silently degrading to unauthenticated legacy mode — that insecure mode
+    requires the explicit ``VB_ALLOW_UNAUTHENTICATED_DAEMON=1`` opt-in (then
+    None is returned).
+    """
+    if ssh is not None and (
+        getattr(ssh, "ssh_runner", None) is not None
+        or getattr(ssh, "_ssh_runner", None) is not None
+    ):
+        return ssh.ensure_daemon_token()
+    return daemon_auth.local_token_or_raise()
+
+
+def _escape_skill_string(s: str) -> str:
+    return escape_skill_string(s)
+
+
+def _escape_for_skill_evalstring_source(s: str) -> str:
+    return (
+        s.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\r", "")
+        .replace("\n", "\\n")
+    )
+
+
+# ---------------------------------------------------------------------------
+# VirtuosoClient — pure SKILL execution client
+# ---------------------------------------------------------------------------
+
+class VirtuosoClient(VirtuosoInterface):
+    """Virtuoso SKILL bridge using the RAMIC daemon over TCP.
+
+    This class only handles TCP communication with the daemon.
+    SSH tunnel management is handled separately by SSHClient.
+    """
+
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 65432,
+        timeout: int = 30,
+        tunnel: Any = None,
+        log_to_ciw: bool = True,
+        daemon_token: str | None = None,
+    ) -> None:
+        self._host = host
+        self._port = port
+        self._timeout = timeout
+        self._tunnel = tunnel  # SSHClient, if provided
+        self._log_to_ciw = log_to_ciw
+        self._daemon_token = daemon_token
+        self._pending_nonce: str | None = None
+        self._daemon_caps: dict[str, Any] | None = None
+        self._remote_virtuoso_pid: int | None = None
+        self.layout = LayoutOps(self)
+        self.library = LibraryOps(self)
+        self.schematic = SchematicOps(self)
+        self.symbol = SymbolOps(self)
+        # Maestro imports the public client type, so defer its facade import
+        # until this client instance is constructed and module initialization
+        # is complete.
+        from virtuoso_bridge.virtuoso.maestro.ops import MaestroOps
+        from virtuoso_bridge.virtuoso.sos import SOSOps
+
+        self.maestro = MaestroOps(self)
+        self.sos = SOSOps(self)
+        from virtuoso_bridge.virtuoso.dialogs import DialogOps
+
+        self.dialogs = DialogOps(self)
+        from virtuoso_bridge.virtuoso.requests import RequestOps
+
+        self.requests = RequestOps(self)
+        self._il_upload_cache: dict[str, tuple[str, str]] = {}
+        # For connect retry when jump host adds latency
+        self._has_jump_host = (
+            bool(os.getenv("VB_JUMP_HOST", "").strip())
+            or (tunnel is not None and getattr(tunnel, '_jump_host', None))
+        )
+
+    # -- factory methods ----------------------------------------------------
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        timeout: int = 30,
+        log_to_ciw: bool = True,
+        profile: str | None = None,
+    ) -> "VirtuosoClient":
+        """Create a VirtuosoClient from environment variables.
+
+        If *profile* is given (e.g. ``"gpu1"``), reads ``VB_REMOTE_HOST_gpu1``
+        etc.  Otherwise resolves a profile binding before falling back to the
+        default unsuffixed variables.  If an SSH tunnel is already running (via
+        ``virtuoso-bridge start``), connects to its port.  Otherwise creates a
+        new SSHClient.
+        """
+        profile = resolve_profile(profile)
+        load_vb_env()
+        from virtuoso_bridge.transport.tunnel import SSHClient
+
+        # Check if tunnel is already running
+        if SSHClient.is_running(profile):
+            state = SSHClient.read_state(profile)
+            if not state:
+                raise RuntimeError("Tunnel state file is missing or invalid.")
+            port = state["port"]
+            ssh = SSHClient.from_env(keep_remote_files=True, profile=profile)
+            # The token never lives in state.json (world-readable by
+            # design); it is fetched from the daemon host over SSH.
+            client = cls(host="127.0.0.1", port=port, timeout=timeout, tunnel=ssh,
+                         log_to_ciw=log_to_ciw, daemon_token=_acquire_daemon_token(ssh))
+            client._reject_cross_user_daemon_if_reachable(profile=profile, timeout=min(timeout, 10))
+            return client
+
+        # No tunnel running: construct the role-aware transports, but defer
+        # daemon token provisioning and identity probing until warm()/start.
+        # Documentation commands use only the GUI runner and must not require
+        # a reachable daemon host or create a daemon token as a side effect.
+        ssh = SSHClient.from_env(keep_remote_files=True, profile=profile)
+        return cls(
+            host="127.0.0.1",
+            port=ssh.port,
+            timeout=timeout,
+            tunnel=ssh,
+            log_to_ciw=log_to_ciw,
+        )
+
+    @classmethod
+    def local(
+        cls,
+        host: str = "127.0.0.1",
+        port: int = 65432,
+        timeout: int = 30,
+    ) -> "VirtuosoClient":
+        """Create a bridge for a locally running daemon.
+
+        The daemon token is read (or created atomically, mode 0600 under a
+        0700 directory) from the local ``~/.virtuoso-bridge/bridge_token`` so
+        local-mode sessions get the same cross-user protection as SSH mode.
+        An unusable token file raises :class:`daemon_auth.DaemonTokenError`
+        unless ``VB_ALLOW_UNAUTHENTICATED_DAEMON=1`` is explicitly set.
+        """
+        return cls(
+            host=host,
+            port=port,
+            timeout=timeout,
+            daemon_token=daemon_auth.local_token_or_raise(),
+        )
+
+    @classmethod
+    def from_tunnel(
+        cls,
+        tunnel: Any,
+        timeout: int = 30,
+        log_to_ciw: bool = True,
+    ) -> "VirtuosoClient":
+        """Create a bridge connected through a SSHClient."""
+        token = None
+        if hasattr(tunnel, "ensure_daemon_token"):
+            token = tunnel.ensure_daemon_token()
+        client = cls(
+            host="127.0.0.1",
+            port=tunnel.port,
+            timeout=timeout,
+            tunnel=tunnel,
+            log_to_ciw=log_to_ciw,
+            daemon_token=token,
+        )
+        # Remote tunnels only: a local SSHClient has no runner, and local
+        # mode has no cross-user exposure over loopback.
+        has_runner = (
+            getattr(tunnel, "ssh_runner", None) is not None
+            or getattr(tunnel, "_ssh_runner", None) is not None
+        )
+        if has_runner:
+            client._reject_cross_user_daemon_if_reachable(
+                profile=getattr(tunnel, "_profile", None),
+                timeout=min(timeout, 10),
+            )
+        return client
+
+    # -- context manager ----------------------------------------------------
+
+    def __enter__(self) -> "VirtuosoClient":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+    # -- properties ---------------------------------------------------------
+
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    @property
+    def remote_host(self) -> str | None:
+        return getattr(self._tunnel, 'remote_host', None) if self._tunnel else None
+
+    @property
+    def is_remote(self) -> bool:
+        return self._tunnel is not None
+
+    @property
+    def is_tunnel_alive(self) -> bool:
+        return self._tunnel is not None and getattr(self._tunnel, 'is_tunnel_alive', False)
+
+    @property
+    def ssh_runner(self):
+        """The underlying SSHRunner, for sharing with SpectreSimulator."""
+        if self._tunnel is None:
+            return None
+        return getattr(self._tunnel, '_ssh_runner', None)
+
+    @property
+    def docs_runner(self):
+        """SSH runner for documentation access (GUI/documentation host)."""
+        if self._tunnel is None:
+            return None
+        if hasattr(self._tunnel, "gui_runner"):
+            return self._tunnel.gui_runner
+        return getattr(self._tunnel, '_ssh_runner', None)
+
+    @property
+    def gui_runner(self):
+        """SSH runner for files and tools located on the Virtuoso GUI host."""
+        return self.docs_runner
+
+    @staticmethod
+    def _is_local_host_name(host: str | None) -> bool:
+        return (host or "").strip().lower() in ("localhost", "127.0.0.1", "::1")
+
+    def _skill_finder_cache_host(self) -> str:
+        """Stable cache segment for SKILL Finder / docs-search data."""
+        if self._tunnel is None:
+            return "local"
+        gui_host = (
+            getattr(self._tunnel, "gui_host", None)
+            or getattr(self._tunnel, "_gui_host", None)
+        )
+        if gui_host is not None:
+            return gui_host if not self._is_local_host_name(gui_host) else "local"
+        remote_host = (
+            getattr(self._tunnel, "remote_host", None)
+            or getattr(self._tunnel, "_remote_host", None)
+        )
+        if remote_host and not self._is_local_host_name(remote_host):
+            return remote_host
+        return "local"
+
+    @property
+    def log_to_ciw(self) -> bool:
+        return self._log_to_ciw
+
+    @log_to_ciw.setter
+    def log_to_ciw(self, value: bool) -> None:
+        self._log_to_ciw = bool(value)
+
+    @property
+    def daemon_token(self) -> str | None:
+        """Shared secret authenticating this client to the bridge daemon."""
+        return self._daemon_token
+
+    @daemon_token.setter
+    def daemon_token(self, value: str | None) -> None:
+        if value != self._daemon_token:
+            # A different secret invalidates any cached handshake result.
+            self._daemon_caps = None
+        self._daemon_token = value
+
+    # -- VirtuosoInterface --------------------------------------------------
+
+    def ensure_ready(self, timeout: int = 10) -> VirtuosoResult:
+        """Ensure the daemon is reachable via TCP."""
+        metadata: dict[str, Any] = {}
+        logger.info("ensure_ready: checking daemon at %s:%d", self._host, self._port)
+
+        # If we have a tunnel, make sure it's up
+        if self._tunnel is not None:
+            try:
+                self._tunnel.warm()
+                if self._daemon_token is None and hasattr(self._tunnel, "daemon_token"):
+                    self._daemon_token = self._tunnel.daemon_token
+                metadata["tunnel_alive"] = self.is_tunnel_alive
+                self._port = self._tunnel.port  # may have changed due to port auto-retry
+                logger.info("ensure_ready: tunnel alive=%s, port=%d",
+                            metadata["tunnel_alive"], self._port)
+            except Exception as e:
+                logger.warning("ensure_ready: tunnel setup failed: %s", e)
+                return VirtuosoResult(
+                    status=ExecutionStatus.ERROR,
+                    errors=[f"Tunnel setup failed: {e}"],
+                    metadata=metadata,
+                )
+
+        report = self.verify_tunnel(timeout=timeout)
+        metadata["diagnostics"] = report
+        errors: list[str] = []
+        if not report["tcp_reachable"]:
+            errors.append("TCP connection to daemon host:port failed")
+        if not report["daemon_responsive"]:
+            errors.append("Daemon did not respond to ping (ensure load() in CIW)")
+
+        if errors:
+            logger.warning("ensure_ready: %s", report["summary"])
+            if self._tunnel and self._tunnel.setup_path and not report.get("daemon_responsive"):
+                print(f'\nPlease execute in Virtuoso CIW: load("{self._tunnel.setup_path}")\n')
+            return VirtuosoResult(status=ExecutionStatus.ERROR, errors=errors, metadata=metadata)
+        logger.info("ensure_ready: %s", report["summary"])
+        return VirtuosoResult(status=ExecutionStatus.SUCCESS, metadata=metadata)
+
+    def warm_remote_session(self, timeout: int = 10) -> VirtuosoResult:
+        """Warm up remote transports without requiring the daemon to answer."""
+        if self._tunnel is None:
+            return VirtuosoResult(status=ExecutionStatus.SUCCESS)
+        try:
+            self._tunnel.warm(timeout=timeout)
+            self._port = self._tunnel.port
+            return VirtuosoResult(
+                status=ExecutionStatus.SUCCESS,
+                metadata={"tunnel_alive": self.is_tunnel_alive},
+            )
+        except Exception as e:
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[str(e)],
+            )
+
+    def _reject_cross_user_daemon_if_reachable(
+        self,
+        *,
+        profile: str | None,
+        timeout: int = 5,
+    ) -> None:
+        """Refuse to hand out a client whose daemon belongs to someone else.
+
+        check_daemon_user never raises: an unreachable daemon skips the check
+        (normal pre-load state), while a reachable daemon that cannot prove
+        its owner — or that belongs to a different user — comes back with
+        ok=False and we hard-fail here.
+        """
+        from virtuoso_bridge.daemon_guard import OVERRIDE_ENV, check_daemon_user
+
+        check = check_daemon_user(self, profile=profile, timeout=timeout)
+        if not check.ok:
+            raise RuntimeError(
+                f"Virtuoso daemon identity check failed: {check.error}. "
+                f"If the daemon is genuinely busy, retry once the CIW is idle; "
+                f"set {OVERRIDE_ENV}=1 only if this cross-user connection is "
+                f"intentional."
+            )
+
+    @property
+    def remote_virtuoso_pid(self) -> int | None:
+        """PID of the remote Virtuoso instance, once :meth:`get_virtuoso_pid`
+        has run (None before that)."""
+        return self._remote_virtuoso_pid
+
+    def get_virtuoso_pid(self, timeout: int | None = None) -> int | None:
+        """PID of the Virtuoso process executing this client's SKILL.
+
+        Asked via ``getpid()`` through the token-authenticated channel, so
+        once authentication has succeeded the answer belongs to the daemon
+        that proved it holds your bridge token — a squatted port cannot
+        produce one.  The value is cached for the client's lifetime and is
+        what ``daemon_guard`` cross-checks over SSH (``ps -o user=``).
+        """
+        if self._remote_virtuoso_pid is not None:
+            return self._remote_virtuoso_pid
+        result = self.execute_skill("getpid()", timeout=timeout if timeout is not None else 10)
+        if result.status != ExecutionStatus.SUCCESS:
+            return None
+        raw = (result.output or "").strip().strip('"')
+        if raw.isdigit():
+            self._remote_virtuoso_pid = int(raw)
+        return self._remote_virtuoso_pid
+
+    # -- SKILL execution ----------------------------------------------------
+
+    def execute_skill(
+        self,
+        skill_code: str,
+        timeout: Optional[float] = None,
+        *,
+        retry_connect: bool = True,
+    ) -> VirtuosoResult:
+        """Execute once, optionally protected by a read-only shared-CIW guard.
+
+        Enable protection with ``client.dialogs.enable_guard()``. A preexisting
+        or unidentifiable dialog prevents transmission. Human actions can race
+        the preflight; failed in-flight operations are never replayed by the
+        guard. ``enable_guard(protect_inflight=True)`` uses recoverable requests
+        with no daemon SIGINT timer; preflight-only/legacy mode is unchanged.
+        """
+        if not self.dialogs.enabled:
+            return self._execute_skill_unguarded(skill_code, timeout, retry_connect=retry_connect)
+        started = time.monotonic()
+        budget = timeout if timeout is not None else self._timeout
+        if isinstance(budget, bool) or budget <= 0 or not math.isfinite(budget):
+            raise ValueError("timeout must be positive and finite")
+        blocked = self.dialogs.preflight(timeout=budget)
+        if blocked is not None:
+            blocked.execution_time = time.monotonic() - started
+            return blocked
+        remaining = budget - (time.monotonic() - started)
+        if remaining <= 0:
+            return VirtuosoResult(status=ExecutionStatus.ERROR,
+                                  errors=["Dialog preflight exhausted the request budget"],
+                                  metadata={"request_sent": False, "outcome": "not_started"},
+                                  execution_time=time.monotonic() - started)
+        if self.dialogs.protect_inflight:
+            result = self.requests._execute(skill_code, started + budget)
+            result.execution_time = time.monotonic() - started
+            return result
+        # The legacy connect retry includes ECONNRESET after transmission.
+        # Shared mode must not replay a possibly accepted write request.
+        result = self._execute_skill_unguarded(skill_code, remaining, retry_connect=False)
+        result = self.dialogs.annotate_failure(
+            result, timeout=max(0, budget - (time.monotonic() - started)),
+        )
+        result.execution_time = time.monotonic() - started
+        return result
+
+    def _execute_skill_unguarded(
+        self, skill_code: str, timeout: Optional[float] = None, *, retry_connect: bool = True,
+    ) -> VirtuosoResult:
+        """Execute SKILL code in Virtuoso via the RAMIC Bridge daemon.
+
+        Set ``retry_connect=False`` for non-idempotent operations that must
+        never be resent after a connection failure.
+        """
+        effective_timeout = timeout if timeout is not None else self._timeout
+
+        start_time = time.monotonic()
+        deadline = start_time + effective_timeout
+        connect_deadline = start_time
+        if retry_connect and self._has_jump_host:
+            connect_deadline = min(
+                deadline,
+                start_time + _TUNNEL_CONNECT_GRACE_SECONDS,
+            )
+
+        logger.debug("execute_skill %s:%d timeout=%g skill=%s",
+                      self._host, self._port, effective_timeout, skill_code[:120])
+
+        try:
+            while True:
+                if time.monotonic() >= deadline:
+                    raise socket.timeout
+                try:
+                    raw_response = self._execute_skill_once(
+                        skill_code,
+                        effective_timeout,
+                        deadline,
+                    )
+                    elapsed = time.monotonic() - start_time
+                    result = self._parse_response(raw_response, elapsed)
+                    logger.debug("execute_skill OK (%.3fs)", elapsed)
+                    return result
+                except ConnectionRefusedError:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        raise socket.timeout
+                    if now >= connect_deadline:
+                        raise
+                    logger.debug("Connection refused, retrying (deadline in %.1fs)",
+                                 connect_deadline - now)
+                    time.sleep(min(_TUNNEL_CONNECT_RETRY_DELAY, connect_deadline - now))
+                except OSError as exc:
+                    now = time.monotonic()
+                    if now >= deadline:
+                        raise socket.timeout from exc
+                    if not self._should_retry_tunnel_connect(exc, now, connect_deadline):
+                        raise
+                    logger.debug("OSError %s, retrying (deadline in %.1fs)",
+                                 exc, connect_deadline - now)
+                    time.sleep(min(_TUNNEL_CONNECT_RETRY_DELAY, connect_deadline - now))
+
+        except daemon_auth.DaemonAuthError as exc:
+            elapsed = time.monotonic() - start_time
+            logger.warning("Daemon authentication failed: %s", exc)
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Bridge authentication failed: {exc}"],
+                execution_time=elapsed,
+            )
+        except socket.timeout:
+            elapsed = time.monotonic() - start_time
+            logger.warning("Socket timeout connecting to %s:%d after %gs",
+                           self._host, self._port, effective_timeout)
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Socket timeout after {effective_timeout}s"],
+                execution_time=elapsed,
+            )
+        except ConnectionRefusedError:
+            elapsed = time.monotonic() - start_time
+            logger.warning("Connection refused to %s:%d (no daemon?)",
+                           self._host, self._port)
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[
+                    f"Connection refused to {self._host}:{self._port}. "
+                    "Ensure the RAMIC Bridge daemon is running in Virtuoso."
+                ],
+                execution_time=elapsed,
+            )
+        except OSError as exc:
+            elapsed = time.monotonic() - start_time
+            logger.warning("Socket error connecting to %s:%d: %s",
+                           self._host, self._port, exc)
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Socket error: {exc}"],
+                execution_time=elapsed,
+            )
+
+    def test_connection(self, timeout: int = 10) -> bool:
+        """Test whether the daemon is reachable."""
+        result = self.execute_skill("1+1", timeout=timeout)
+        return result.status == ExecutionStatus.SUCCESS
+
+    def verify_tunnel(self, timeout: int = 5) -> dict[str, Any]:
+        """Diagnose connectivity."""
+        logger.info("verify_tunnel: probing %s:%d (timeout=%ds)", self._host, self._port, timeout)
+        report: dict[str, Any] = {
+            "tunnel_process_alive": None,
+            "tcp_reachable": False,
+            "daemon_responsive": False,
+            "daemon_output": "",
+            "summary": "",
+        }
+
+        if self._tunnel is not None:
+            report["tunnel_process_alive"] = self.is_tunnel_alive
+
+        result = self.execute_skill("1+1", timeout=timeout)
+        report["daemon_responsive"] = result.status == ExecutionStatus.SUCCESS
+        report["daemon_output"] = result.output
+        report["tcp_reachable"] = not any(
+            err.startswith("Connection refused to ") or err.startswith("Socket error:")
+            for err in result.errors
+        )
+
+        parts: list[str] = []
+        if report["tunnel_process_alive"] is True:
+            parts.append("tunnel: alive")
+        elif report["tunnel_process_alive"] is False:
+            parts.append("tunnel: DEAD")
+        else:
+            parts.append("tunnel: not managed (local)")
+        parts.append(
+            f"tcp {self._host}:{self._port}: "
+            + ("OK" if report["tcp_reachable"] else "UNREACHABLE")
+        )
+        parts.append("daemon: " + ("OK" if report["daemon_responsive"] else "NO RESPONSE"))
+        report["summary"] = " | ".join(parts)
+        if result.errors:
+            logger.warning("verify_tunnel: %s errors=%s", report["summary"], result.errors)
+        else:
+            logger.info("verify_tunnel: %s", report["summary"])
+        return report
+
+    # -- cellview operations ------------------------------------------------
+
+    def open_cell_view(self, lib: str, cell: str, *, view: str | None = None,
+                       view_type: str | None = None, mode: str = "a",
+                       timeout: int | None = None) -> VirtuosoResult:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        actual_view = view or "layout"
+        actual_view_type = view_type or default_view_type_for(actual_view)
+        skill = op_open_cell_view(
+            lib,
+            cell,
+            view=actual_view,
+            view_type=actual_view_type,
+            mode=mode,
+        )
+        return self.execute_skill(skill, timeout=effective_timeout)
+
+    def open_window(self, lib: str, cell: str, *, view: str = "schematic",
+                    view_type: str | None = None, timeout: int | None = None) -> VirtuosoResult:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        skill = op_open_window(lib, cell, view=view, view_type=view_type)
+        return self.execute_skill(skill, timeout=effective_timeout)
+
+    def save_current_cellview(self, timeout: int | None = None) -> VirtuosoResult:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        return self.execute_skill(op_save_current_cellview(), timeout=effective_timeout)
+
+    def close_current_cellview(self, timeout: int | None = None) -> VirtuosoResult:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        return self.execute_skill(op_close_current_cellview(), timeout=effective_timeout)
+
+    def get_current_design(self, timeout: int | None = None) -> tuple[str | None, str | None, str | None]:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        skill = (
+            "ddGetObjReadPath(dbGetCellViewDdId(geGetEditCellView()))"
+        )
+        result = self.execute_skill(skill, timeout=effective_timeout)
+        if result.status != ExecutionStatus.SUCCESS:
+            return None, None, None
+        output = (result.output or "").strip()
+        if not output or output.lower() == "nil":
+            return None, None, None
+        parts = output.split("/")
+        if len(parts) < 4:
+            return None, None, None
+        return parts[-4], parts[-3], parts[-2]
+
+    # -- screenshot -------------------------------------------------------------
+
+    def list_windows(self, timeout: int | None = None) -> list[dict[str, str]]:
+        """Return a list of all open Virtuoso windows.
+
+        Each entry has keys: ``num`` and ``name`` (raw from ``hiGetWindowName``).
+        """
+        effective_timeout = timeout if timeout is not None else self._timeout
+        # Use "|" as delimiter — tab/newline get escaped in the SKILL→Python path.
+        # Guard against windows whose hiGetWindowName returns nil (e.g. some
+        # transient sub-forms).  Previously we wrapped with errset() but that
+        # only catches actual errors, not a nil-valued success — sprintf %s
+        # on nil then raised and blew away the entire accumulated result.
+        skill = r'''
+let((result winName ciwNum)
+  result = ""
+  ciwNum = -1
+  let((ciw)
+    ciw = hiGetCIWindow()
+    when(ciw
+      ciwNum = ciw~>windowNum
+      winName = hiGetWindowName(ciw)
+      when(stringp(winName)
+        result = strcat(result sprintf(nil "%d|%s;" ciwNum winName)))))
+  foreach(w hiGetWindowList()
+    when(w~>windowNum != ciwNum
+      let((nm) nm = hiGetWindowName(w)
+        when(stringp(nm)
+          result = strcat(result sprintf(nil "%d|%s;" w~>windowNum nm))))))
+  result)
+'''
+        r = self.execute_skill(skill, timeout=effective_timeout)
+        windows: list[dict[str, str]] = []
+        if r.status != ExecutionStatus.SUCCESS or not r.output:
+            return windows
+        raw = r.output.strip().strip('"')
+        # Decode SKILL octal escapes like \256 → ®
+        raw = re.sub(r'\\(\d{3})', lambda m: chr(int(m.group(1), 8)), raw)
+        for entry in raw.split(";"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            parts = entry.split("|", 1)
+            if len(parts) < 2:
+                continue
+            windows.append({
+                "num": parts[0],
+                "name": parts[1],
+            })
+        return windows
+
+    def screenshot(
+        self,
+        output: str | Path | None = None,
+        *,
+        target: str | int = "ciw",
+        timeout: int | None = None,
+    ) -> VirtuosoResult:
+        """Take a screenshot of a Virtuoso window and download it locally.
+
+        Args:
+            output: Local path for the screenshot. Uses the user artifact
+                screenshots directory if *None*.
+            target: ``"ciw"`` (default), ``"current"``, a view name like
+                ``"schematic"``/``"layout"``/``"maestro"``, or an integer
+                window number.
+        """
+        from virtuoso_bridge.transport.remote_paths import (
+            default_virtuoso_bridge_dir,
+            resolve_remote_username,
+        )
+
+        effective_timeout = timeout if timeout is not None else self._timeout
+
+        # Build SKILL expression that resolves the target window
+        if target == "ciw":
+            win_expr = "hiGetCIWindow()"
+        elif target == "current":
+            win_expr = "hiGetCurrentWindow()"
+        elif isinstance(target, int):
+            win_expr = (
+                f'let((found) foreach(w hiGetWindowList() '
+                f'when(w~>windowNum=={target} found=w)) found)'
+            )
+        else:
+            escaped_view = _escape_skill_string(str(target))
+            win_expr = (
+                f'let((found) foreach(w hiGetWindowList() '
+                f'when(w~>cellView && w~>cellView~>viewName=="{escaped_view}" found=w)) found)'
+            )
+
+        # Remote path
+        username = resolve_remote_username(
+            configured_user=self._tunnel._remote_user if self._tunnel else None,
+            runner=self._tunnel._ssh_runner if self._tunnel else None,
+        )
+        from virtuoso_bridge.transport.remote_paths import resolve_client_id
+
+        client_id = resolve_client_id(getattr(self._tunnel, '_profile', None)) if self._tunnel else None
+        screenshot_dir = default_virtuoso_bridge_dir(username, "screenshots", client_id)
+        if self._tunnel and self._tunnel._ssh_runner:
+            self._tunnel._ssh_runner.run_command(f"mkdir -p {screenshot_dir}")
+
+        from datetime import datetime
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        label = str(target) if isinstance(target, int) else target
+        remote_path = f"{screenshot_dir}/{label}_{stamp}.png"
+        escaped_path = _escape_skill_string(remote_path)
+
+        skill = (
+            f'let((w) w={win_expr} '
+            f'if(w '
+            f'hiWindowSaveImage(?target w ?path "{escaped_path}" ?format "png" ?toplevel t) '
+            f'"error: window not found"))'
+        )
+        r = self.execute_skill(skill, timeout=effective_timeout)
+        if r.status != ExecutionStatus.SUCCESS:
+            return r
+        if (r.output or "").strip().strip('"') == "error: window not found":
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Window not found: {target}"],
+                execution_time=r.execution_time,
+            )
+
+        # Download
+        filename = f"{label}_{stamp}.png"
+        if output is None:
+            from virtuoso_bridge.runtime_paths import artifact_dir
+            output = artifact_dir("screenshots") / filename
+        else:
+            output = Path(output)
+            if output.is_dir():
+                output = output / filename
+        return self.download_file(remote_path, output, timeout=effective_timeout)
+
+    def ciw_print(self, message: str, timeout: int | None = None) -> VirtuosoResult:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        escaped = _escape_skill_string(message)
+        return self.execute_skill(f'printf("{escaped}\\n")', timeout=effective_timeout)
+
+    def ciw_log(self, skill_code: str, timeout: int | None = None) -> VirtuosoResult:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        return self.execute_skill(skill_code, timeout=effective_timeout)
+
+    def fetch(self, expr: str, fields: list[str], *,
+              timeout: int | None = None) -> list[dict]:
+        """Run a SKILL expression that returns a **list of objects** and
+        extract the given ``~>slot`` names from each element, all in a
+        single round-trip.
+
+        This is the batch alternative to per-attribute access.  Instead
+        of N round-trips::
+
+            # Slow — each attribute access is one network call.
+            sel = client.execute_skill("geGetSelSet()")   # "db:0x..."
+            for o in each_inst:                           # N × 3 calls
+                name     = client.execute_skill(f"{o}~>name")
+                cellName = client.execute_skill(f"{o}~>cellName")
+                objType  = client.execute_skill(f"{o}~>objType")
+
+        do a single call that pulls every field for every element::
+
+            objs = client.fetch("geGetSelSet()",
+                                ["objType", "cellName", "name"])
+            # [{"objType": "inst", "cellName": "nch_mac", "name": "M1"},
+            #  {"objType": "inst", "cellName": "pch_mac", "name": "M2"},
+            #  ...]
+            print(objs[0]["name"])
+
+        Values are decoded with SKILL s-expression rules: quoted
+        strings are unquoted/unescaped, ``nil`` → ``None``, ``t`` →
+        ``True``, nested lists → nested Python lists, and bare atoms
+        (numbers / symbols) are returned as their original string so
+        the caller can coerce as needed.
+
+        Use :meth:`fetch_one` for single-object expressions.
+        """
+        # Late import: the parser lives under maestro/reader but is
+        # pure and general.  Keeping the import local avoids
+        # constructing the wider maestro package at module load.
+        from virtuoso_bridge.virtuoso.maestro.reader._parse_skill import (
+            _parse_sexpr,
+        )
+        slots = " ".join(f"o~>{f}" for f in fields)
+        sk = f"mapcar(lambda((o) list({slots})) {expr})"
+        raw = self.execute_skill(sk, timeout=timeout).output or ""
+        parsed = _parse_sexpr(raw.strip())
+        if not isinstance(parsed, list):
+            return []
+        return [
+            dict(zip(fields, row))
+            for row in parsed
+            if isinstance(row, list)
+        ]
+
+    def fetch_one(self, expr: str, fields: list[str], *,
+                  timeout: int | None = None) -> dict:
+        """Single-object variant of :meth:`fetch`.  Wraps ``expr`` in
+        a one-element ``list(...)`` and returns the first dict (or an
+        empty dict if the expression yielded nothing).
+
+        Example::
+
+            cv = client.fetch_one("geGetEditCellView()",
+                                  ["libName", "cellName", "viewName"])
+            # {"libName": "PLAYGROUND", "cellName": "AMP", "viewName": "schematic"}
+        """
+        rows = self.fetch(f"list({expr})", fields, timeout=timeout)
+        return rows[0] if rows else {}
+
+    def run_shell_command(self, cmd: str, timeout: int | None = None) -> VirtuosoResult:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        escaped = _escape_skill_string(cmd)
+        result = self.execute_skill(f'csh("{escaped}")', timeout=effective_timeout)
+        if result.status != ExecutionStatus.SUCCESS:
+            return result
+        if (result.output or "").strip().lower() == "nil":
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Shell command failed (csh returned nil): {cmd}"],
+                metadata={"cmd": cmd},
+                execution_time=result.execution_time,
+            )
+        return result
+
+    # -- X11 dialog recovery (bypasses SKILL channel) ----------------------
+
+    def dismiss_dialog(self, display: str | None = None, *, allow_legacy_bulk: bool = False) -> list[dict]:
+        """Explicit opt-in legacy bulk dismissal, refused in shared mode.
+
+        Prefer read-only ``dialogs.inspect()``. This legacy action can affect
+        human/unrelated dialogs and must not be used as implicit recovery.
+        """
+        if self.dialogs.enabled:
+            return [{"error": "Bulk dismissal is refused while the shared CIW guard is enabled; user dialogs must be preserved."}]
+        if not allow_legacy_bulk:
+            return [{"error": "Bulk dismissal requires explicit allow_legacy_bulk=True. Prefer dialogs.inspect() and an authorized explicit window/action."}]
+        load_vb_env()
+        from virtuoso_bridge.virtuoso import x11
+        runner = self.gui_runner
+        if runner is None:
+            # Local mode: x11.dismiss_dialogs accepts runner=None and runs
+            # the helper as a local subprocess.  user is only used to
+            # namespace the remote /tmp helper copy; in local mode it is
+            # unused but kept for API symmetry.
+            user = os.getenv("USER", "") or os.getenv("USERNAME", "") or "local"
+        else:
+            user = runner.user or os.getenv("VB_REMOTE_USER", "")
+        profile = getattr(self._tunnel, "_profile", None) if self._tunnel else None
+        return x11.dismiss_dialogs(runner, user, display, profile=profile, allow_legacy_bulk=True)
+
+    # -- file transfer (delegates to tunnel) --------------------------------
+
+    def download_file(self, remote_path: str | Path, local_path: str | Path,
+                      *, timeout: int | None = None,
+                      recursive: bool = False) -> VirtuosoResult:
+        started = time.perf_counter()
+        source = _path_to_posix(remote_path)
+        destination = Path(local_path)
+
+        if self._tunnel is not None and getattr(self._tunnel, "ssh_runner", None) is not None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            result = self._tunnel.download_file(
+                source,
+                destination,
+                timeout=timeout,
+                recursive=recursive,
+            )
+            elapsed = time.perf_counter() - started
+            if result.returncode != 0:
+                return VirtuosoResult(
+                    status=ExecutionStatus.ERROR,
+                    errors=[result.stderr.strip() or f"Failed to download {source}"],
+                    execution_time=elapsed,
+                    metadata={"remote_path": source, "local_path": str(destination)},
+                )
+            return VirtuosoResult(
+                status=ExecutionStatus.SUCCESS,
+                output=str(destination),
+                execution_time=elapsed,
+                metadata={"remote_path": source, "local_path": str(destination)},
+            )
+
+        # Local mode: just copy
+        import shutil
+        try:
+            if recursive:
+                source_path = Path(source).resolve()
+                destination_path = destination.resolve(strict=False)
+                if (
+                    source_path == destination_path
+                    or source_path.is_relative_to(destination_path)
+                    or destination_path.is_relative_to(source_path)
+                ):
+                    return VirtuosoResult(
+                        status=ExecutionStatus.ERROR,
+                        errors=[
+                            "Refusing recursive copy with overlapping "
+                            f"source and destination: {source} -> {destination}"
+                        ],
+                        execution_time=time.perf_counter() - started,
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    if destination.is_dir():
+                        shutil.rmtree(destination)
+                    else:
+                        destination.unlink()
+                shutil.copytree(Path(source), destination)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(Path(source), destination)
+        except OSError as exc:
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Failed to copy {source}: {exc}"],
+                execution_time=time.perf_counter() - started,
+            )
+        return VirtuosoResult(
+            status=ExecutionStatus.SUCCESS,
+            output=str(destination),
+            execution_time=time.perf_counter() - started,
+        )
+
+    def upload_file(self, local_path: str | Path, remote_path: str | Path,
+                    *, timeout: int | None = None) -> VirtuosoResult:
+        started = time.perf_counter()
+        source = Path(local_path)
+        destination = _path_to_posix(remote_path)
+
+        if not source.exists():
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Local file not found: {source}"],
+                execution_time=time.perf_counter() - started,
+            )
+
+        if self._tunnel is not None and getattr(self._tunnel, "ssh_runner", None) is not None:
+            result = self._tunnel.upload_file(source, destination, timeout=timeout)
+            elapsed = time.perf_counter() - started
+            if result.returncode != 0:
+                return VirtuosoResult(
+                    status=ExecutionStatus.ERROR,
+                    errors=[result.stderr.strip() or f"Failed to upload {source}"],
+                    execution_time=elapsed,
+                )
+            return VirtuosoResult(
+                status=ExecutionStatus.SUCCESS,
+                output=destination,
+                execution_time=elapsed,
+            )
+
+        # Local mode
+        import shutil
+        try:
+            target = Path(destination)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        except OSError as exc:
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Failed to copy {source}: {exc}"],
+                execution_time=time.perf_counter() - started,
+            )
+        return VirtuosoResult(
+            status=ExecutionStatus.SUCCESS,
+            output=str(destination),
+            execution_time=time.perf_counter() - started,
+        )
+
+    # -- SKILL Finder -------------------------------------------------------
+
+    def find_skill(
+        self,
+        query: str,
+        *,
+        mode: str = "fuzzy",
+        limit: int = 50,
+        include_desc: bool = False,
+        source_dir: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> list[dict]:
+        """Search SKILL API documentation by name.
+
+        On first call (or when *source_dir* is not provided), discovers
+        the SKILL Finder directory on the GUI/documentation host by walking
+        up from
+        the ``virtuoso`` binary to ``doc/finder/SKILL``.  The directory is
+        cached locally in *cache_dir* (default:
+        the user cache directory under ``skill_finder/<host>`` so subsequent
+        calls are fast without additional network traffic.
+
+        Parameters
+        ----------
+        query : str
+            Search string (function name, or substring/prefix/suffix/regex
+            depending on *mode*).
+        mode : str
+            Search mode — one of:
+
+            - ``fuzzy`` (default) — case-insensitive substring match
+            - ``prefix`` — name starts with *query*
+            - ``suffix`` — name ends with *query*
+            - ``exact`` — exact name match
+            - ``regex`` — Python regular expression match
+
+        limit : int
+            Maximum results to return (default 50).
+        include_desc : bool
+            Also search in the description field (default: False).
+        source_dir : str | Path | None
+            Override the SKILL Finder source directory.  If None, the
+            directory is auto-discovered on the remote server.
+        cache_dir : str | Path | None
+            Local cache directory for downloaded .fnd files.  If None,
+            defaults to the user cache directory under ``skill_finder/<host>``.
+
+        Returns
+        -------
+        list[dict]
+            List of matching entries, each a dict with keys:
+            ``name``, ``syntax``, ``description``, ``source_file``.
+        """
+        from pathlib import Path as _Path
+        from virtuoso_bridge.runtime_paths import cache_dir as runtime_cache_dir
+        from virtuoso_bridge.virtuoso.skill_finder import (
+            SKILLFinder,
+            SearchMode,
+        )
+
+        # Resolve cache directory
+        if cache_dir:
+            cache_path = _Path(cache_dir).expanduser().resolve()
+        else:
+            cache_root = runtime_cache_dir("skill_finder")
+            cache_path = cache_root / self._skill_finder_cache_host()
+
+        # Discover SKILL Finder root
+        runner = self.docs_runner
+        if source_dir:
+            finder_root = _Path(source_dir)
+            doc_root = finder_root.parent.parent
+        elif runner is not None:
+            from virtuoso_bridge.virtuoso.docs_search import to_remote_posix
+
+            profile = getattr(self._tunnel, "_profile", None) if self._tunnel else None
+            finder = SKILLFinder()
+            finder_root = finder.discover(remote_runner=runner, profile=profile)
+            if finder_root is None:
+                logger.warning(
+                    "find_skill: could not locate doc/finder/SKILL on %s",
+                    self._skill_finder_cache_host(),
+                )
+                return []
+            # Remote paths must stay POSIX even on a Windows client, where
+            # Path("/opt/cadence/...") would stringify with backslashes.
+            remote_finder_root = to_remote_posix(finder_root)
+            # Download .fnd files if cache is stale
+            cache_marker = cache_path / ".source_dir"
+            needs_download = True
+            if cache_path.exists() and cache_marker.exists():
+                cached = cache_marker.read_text().strip()
+                needs_download = cached != remote_finder_root
+            if needs_download:
+                import shutil
+                # Clear stale cache
+                if cache_path.exists():
+                    shutil.rmtree(cache_path)
+                cache_path.mkdir(parents=True, exist_ok=True)
+                logger.info(
+                    "find_skill: downloading SKILL Finder from %s", remote_finder_root
+                )
+                try:
+                    result = runner.download(
+                        remote_finder_root,
+                        cache_path,
+                        recursive=True,
+                        timeout=120,
+                    )
+                    if result.returncode != 0:
+                        logger.warning(
+                            "find_skill: download failed — %s",
+                            result.stderr.strip(),
+                        )
+                        return []
+                    cache_marker.write_text(remote_finder_root)
+                except Exception as exc:
+                    logger.warning("find_skill: download error — %s", exc)
+                    return []
+            finder_root = cache_path
+            # Also store the doc root (parent of doc/finder/SKILL) for More Info use
+            doc_root = finder_root.parent.parent
+            doc_root_marker = cache_path / ".doc_root"
+            if not doc_root_marker.exists() or doc_root_marker.read_text().strip() != str(doc_root):
+                doc_root_marker.write_text(str(doc_root))
+        else:
+            # Local mode
+            finder = SKILLFinder()
+            finder_root = finder.discover(remote_runner=None)
+            if finder_root is None:
+                logger.warning("find_skill: could not locate SKILL Finder locally")
+                return []
+            doc_root = finder_root.parent.parent
+
+        # Parse and search
+        finder = SKILLFinder()
+        finder.source_dir = finder_root
+        try:
+            finder.load(finder_root)
+        except Exception as exc:
+            logger.warning("find_skill: failed to load .fnd files — %s", exc)
+            return []
+
+        results = finder.search(query, mode=mode, limit=limit, include_desc=include_desc)
+        return [e.to_dict() for e in results]
+
+
+    def get_skill_more_info(
+        self,
+        func_name: str,
+        *,
+        source_dir: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+    ) -> dict | None:
+        """Get More Info documentation for a specific SKILL function.
+
+        The More Info system consists of a ``api_more_info.tgf`` index
+        and associated HTML files containing detailed function documentation.
+
+        On first call, the index and referenced HTML files are downloaded
+        to a local cache.  Subsequent calls use the cache.
+
+        Parameters
+        ----------
+        func_name : str
+            Name of the SKILL function to look up.
+        source_dir : str | Path | None
+            Override the doc root directory (parent of ``api_more_info/``).
+            If None, auto-discovered on the GUI/documentation host.
+        cache_dir : str | Path | None
+            Local cache directory.  If None, defaults to
+            the user cache directory under ``skill_finder/<host>``.
+
+        Returns
+        -------
+        dict or None
+            Dict with keys: ``func_name``, ``file_path``, ``topic``,
+            ``raw_html``, ``plain_text``.  Returns None if the function
+            has no More Info entry.
+        """
+        from pathlib import Path as _Path
+        from virtuoso_bridge.runtime_paths import cache_dir as runtime_cache_dir
+        from virtuoso_bridge.virtuoso.skill_finder import SKILLFinder
+        from virtuoso_bridge.virtuoso.skill_finder.more_info import (
+            html_to_plain_text,
+            parse_tgf_index,
+            resolve_doc_path,
+        )
+
+        if cache_dir:
+            cache_path = _Path(cache_dir).expanduser().resolve()
+        else:
+            cache_root = runtime_cache_dir("skill_finder")
+            cache_path = cache_root / self._skill_finder_cache_host()
+
+        # Determine doc root
+        runner = self.docs_runner
+        from virtuoso_bridge.virtuoso.docs_search import to_remote_posix
+
+        remote_doc_root: str | None = None
+        if source_dir:
+            doc_root = _Path(source_dir)
+            if runner is not None:
+                remote_doc_root = to_remote_posix(doc_root)
+        elif runner is not None:
+            profile = getattr(self._tunnel, "_profile", None) if self._tunnel else None
+            finder = SKILLFinder()
+            finder_root = finder.discover(remote_runner=runner, profile=profile)
+            if finder_root is None:
+                logger.warning(
+                    "get_skill_more_info: could not locate doc/finder/SKILL on %s",
+                    self._skill_finder_cache_host(),
+                )
+                return None
+            doc_root = finder_root.parent.parent
+            # Remote paths must stay POSIX even on a Windows client.
+            remote_doc_root = to_remote_posix(doc_root)
+        else:
+            finder = SKILLFinder()
+            finder_root = finder.discover(remote_runner=None)
+            if finder_root is None:
+                logger.warning("get_skill_more_info: could not locate SKILL Finder locally")
+                return None
+            doc_root = finder_root.parent.parent
+
+        # More Info cache subdirectory
+        mi_cache = cache_path / "more_info"
+        mi_cache.mkdir(parents=True, exist_ok=True)
+        tgf_marker = mi_cache / ".source_dir"
+
+        # Remote: download .tgf and needed HTML files
+        if runner is not None:
+            assert remote_doc_root is not None
+            tgf_remote_path = f"{remote_doc_root}/api_more_info/api_more_info.tgf"
+            tgf_local_path = mi_cache / "api_more_info.tgf"
+
+            needs_download = (
+                not tgf_local_path.exists()
+                or tgf_marker.exists()
+                and tgf_marker.read_text().strip() != tgf_remote_path
+            )
+
+            if needs_download:
+                logger.info(
+                    "get_skill_more_info: downloading .tgf index from %s", tgf_remote_path
+                )
+                try:
+                    # Download just the .tgf file first (into the cache dir,
+                    # not over it: a file download whose local path is a
+                    # directory would replace the directory with a file).
+                    result = runner.download(
+                        tgf_remote_path,
+                        tgf_local_path,
+                        recursive=False,
+                        timeout=30,
+                    )
+                    if result.returncode != 0:
+                        logger.warning(
+                            "get_skill_more_info: .tgf download failed — %s",
+                            result.stderr.strip(),
+                        )
+                        return None
+                    tgf_marker.write_text(tgf_remote_path)
+                except Exception as exc:
+                    logger.warning("get_skill_more_info: download error — %s", exc)
+                    return None
+
+            # Parse .tgf to find which HTML files are needed for this function
+            entries = parse_tgf_index(tgf_local_path)
+            entry = entries.get(func_name.lower())
+            if entry is None:
+                # OCEAN/ViVA_SKILL functions are indexed with a suffix
+                # (e.g. ocnPrint_OCEAN).  Try appending known suffixes so that
+                # ``skill-info ocnPrint`` finds ocnPrint_OCEAN automatically.
+                for suffix in ("_ocean", "_viva_skill"):
+                    entry = entries.get(func_name.lower() + suffix)
+                    if entry is not None:
+                        break
+            if entry is None:
+                return None
+
+            # Check if the referenced HTML file is cached
+            html_rel_path = entry.file_path.lstrip("$")  # e.g. "abstract/abstract_skill.html"
+            html_local_path = mi_cache / html_rel_path
+            html_remote_path = f"{remote_doc_root}/{html_rel_path}"
+
+            if not html_local_path.exists():
+                logger.info(
+                    "get_skill_more_info: downloading %s", html_remote_path
+                )
+                try:
+                    html_local_path.parent.mkdir(parents=True, exist_ok=True)
+                    result = runner.download(
+                        html_remote_path,
+                        html_local_path,
+                        recursive=False,
+                        timeout=30,
+                    )
+                    if result.returncode != 0:
+                        logger.warning(
+                            "get_skill_more_info: HTML download failed — %s",
+                            result.stderr.strip(),
+                        )
+                        return None
+                except Exception as exc:
+                    logger.warning(
+                        "get_skill_more_info: HTML download error — %s", exc
+                    )
+                    return None
+
+            # Extract the topic from HTML
+            try:
+                html_content = html_local_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return None
+
+            if entry.topic:
+                raw_html = None
+                # Try to extract specific topic
+                from virtuoso_bridge.virtuoso.skill_finder.more_info import (
+                    extract_topic_from_html,
+                )
+                raw_html = extract_topic_from_html(html_content, entry.topic)
+            else:
+                # Whole file is the More Info — no topic extraction needed
+                raw_html = html_content
+
+            if raw_html is None:
+                return None
+
+            plain_text = html_to_plain_text(raw_html)
+            return {
+                "func_name": entry.func_name,
+                "file_path": entry.file_path,
+                "topic": entry.topic,
+                "raw_html": raw_html,
+                "plain_text": plain_text,
+            }
+
+        else:
+            # Local mode
+            tgf_path = doc_root / "api_more_info" / "api_more_info.tgf"
+            entries = parse_tgf_index(tgf_path)
+            entry = entries.get(func_name.lower())
+            if entry is None:
+                for suffix in ("_ocean", "_viva_skill"):
+                    entry = entries.get(func_name.lower() + suffix)
+                    if entry is not None:
+                        break
+            if entry is None:
+                return None
+
+            html_path = resolve_doc_path(tgf_path, entry.file_path)
+            if not html_path.exists():
+                return None
+
+            try:
+                html_content = html_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return None
+
+            if entry.topic:
+                from virtuoso_bridge.virtuoso.skill_finder.more_info import (
+                    extract_topic_from_html,
+                )
+                raw_html = extract_topic_from_html(html_content, entry.topic)
+            else:
+                raw_html = html_content
+
+            if raw_html is None:
+                return None
+
+            plain_text = html_to_plain_text(raw_html)
+            return {
+                "func_name": entry.func_name,
+                "file_path": entry.file_path,
+                "topic": entry.topic,
+                "raw_html": raw_html,
+                "plain_text": plain_text,
+            }
+
+
+    # -- Cadence documentation search --------------------------------------
+
+    def search_docs(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        doc_roots: list[str | Path] | None = None,
+        cache_dir: str | Path | None = None,
+        rebuild_index: bool = False,
+    ) -> dict[str, object]:
+        """Search installed Cadence documentation.
+
+        In SSH mode this discovers documentation roots on the remote Cadence
+        installation, builds a local SQLite index from remote metadata, and
+        reuses that index for later queries. In local mode it indexes
+        configured local doc roots directly.
+        """
+        from pathlib import Path as _Path
+        from virtuoso_bridge.runtime_paths import cache_dir as runtime_cache_dir
+        from virtuoso_bridge.virtuoso.docs_search import (
+            cache_remote_doc_matches,
+            discover_remote_doc_roots,
+            find_remote_doc_matches,
+            remap_results_to_remote,
+            resolve_doc_roots,
+            search_docs,
+            search_remote_docs,
+        )
+        from virtuoso_bridge.virtuoso.skill_finder import SKILLFinder
+
+        safe_limit = max(limit, 0)
+        runner = self.docs_runner
+
+        if doc_roots:
+            roots = resolve_doc_roots(doc_roots)
+            cache_root = _Path(cache_dir).expanduser() if cache_dir else runtime_cache_dir("docs_search")
+            return {
+                "doc_roots": [str(root) for root in roots],
+                "results": search_docs(
+                    query,
+                    roots,
+                    cache_root=cache_root / self._skill_finder_cache_host(),
+                    limit=safe_limit,
+                    rebuild=rebuild_index,
+                ),
+            }
+
+        if runner is not None:
+            profile = getattr(self._tunnel, "_profile", None) if self._tunnel else None
+            remote_roots = discover_remote_doc_roots(runner, profile=profile)
+            if not remote_roots:
+                return {"doc_roots": [], "results": []}
+
+            if cache_dir:
+                cache_root = _Path(cache_dir).expanduser()
+            else:
+                cache_root = runtime_cache_dir("docs_search")
+
+            try:
+                return {
+                    "doc_roots": remote_roots,
+                    "results": search_remote_docs(
+                        runner,
+                        query,
+                        remote_roots,
+                        cache_root=cache_root / self._skill_finder_cache_host(),
+                        limit=safe_limit,
+                        rebuild=rebuild_index,
+                    ),
+                }
+            except Exception as exc:
+                logger.warning("search_docs: remote index failed, falling back to candidate download: %s", exc)
+                matches = find_remote_doc_matches(runner, query, remote_roots, limit=safe_limit)
+                local_roots, root_map = cache_remote_doc_matches(
+                    runner,
+                    matches,
+                    cache_root / self._skill_finder_cache_host(),
+                )
+                results = search_docs(query, local_roots, limit=safe_limit)
+                return {
+                    "doc_roots": remote_roots,
+                    "results": remap_results_to_remote(results, root_map),
+                }
+
+        roots = resolve_doc_roots()
+        if not roots:
+            finder_root = SKILLFinder().discover(remote_runner=None)
+            if finder_root is not None:
+                roots = [finder_root.parent.parent.resolve()]
+        cache_root = _Path(cache_dir).expanduser() if cache_dir else runtime_cache_dir("docs_search")
+        return {
+            "doc_roots": [str(root) for root in roots],
+            "results": search_docs(
+                query,
+                roots,
+                cache_root=cache_root / self._skill_finder_cache_host(),
+                limit=safe_limit,
+                rebuild=rebuild_index,
+            ),
+        }
+
+    def doc_info(
+        self,
+        doc_roots: list[str | Path] | None = None,
+    ) -> dict[str, object]:
+        """Report version + structure facts for the configured doc roots.
+
+        In SSH mode this discovers documentation roots on the GUI/
+        documentation host and reads version/structure facts there. With
+        explicit *doc_roots* (or without a documentation runner) it
+        inspects local paths.
+
+        The payload schema is identical for every mode:
+        ``{"ok": bool, "doc_roots": [...]}``.
+        """
+        from virtuoso_bridge.virtuoso.docs_search import (
+            discover_remote_doc_roots,
+            doc_root_info_local,
+            doc_root_info_remote,
+            resolve_doc_roots,
+        )
+        from virtuoso_bridge.virtuoso.skill_finder import SKILLFinder
+
+        if doc_roots:
+            roots = resolve_doc_roots(doc_roots)
+            return {
+                "ok": True,
+                "doc_roots": doc_root_info_local(roots),
+            }
+
+        runner = self.docs_runner
+        if runner is not None:
+            profile = getattr(self._tunnel, "_profile", None) if self._tunnel else None
+            remote_roots = discover_remote_doc_roots(runner, profile=profile)
+            if not remote_roots:
+                return {"ok": True, "doc_roots": []}
+            return {
+                "ok": True,
+                "doc_roots": doc_root_info_remote(runner, remote_roots),
+            }
+
+        roots = resolve_doc_roots()
+        if not roots:
+            finder_root = SKILLFinder().discover(remote_runner=None)
+            if finder_root is not None:
+                roots = [finder_root.parent.parent.resolve()]
+        return {
+            "ok": True,
+            "doc_roots": doc_root_info_local(roots),
+        }
+
+
+    # -- IL loading ---------------------------------------------------------
+
+    def load_il(self, path: str | Path, timeout: int | None = None) -> VirtuosoResult:
+        """Load an IL file in Virtuoso."""
+        try:
+            prepared, uploaded = self._prepare_il_path(path)
+        except Exception as e:
+            return VirtuosoResult(
+                status=ExecutionStatus.ERROR,
+                errors=[f"Failed to prepare IL path: {e}"],
+            )
+
+        effective_timeout = timeout if timeout is not None else self._timeout
+        skill_command = f'load("{_escape_for_skill_evalstring_source(prepared)}")'
+        result = self.execute_skill(skill_command, timeout=effective_timeout)
+
+        if self._log_to_ciw and result.status == ExecutionStatus.SUCCESS:
+            self.ciw_log(
+                f'printf("[RAMIC] loaded {_escape_skill_string(prepared)}\\n")',
+                timeout=5,
+            )
+
+        result.metadata["uploaded"] = uploaded
+        result.metadata["skill_command"] = skill_command
+        return result
+
+    def run_il_file(self, path: str | Path, lib: str, cell: str, *,
+                    view: str = "layout", view_type: str | None = None,
+                    mode: str = "a", open_window: bool = True,
+                    save: bool = False, timeout: int | None = None) -> VirtuosoResult:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        opened = self.open_cell_view(lib, cell, view=view, view_type=view_type, mode=mode, timeout=effective_timeout)
+        if opened.status != ExecutionStatus.SUCCESS:
+            return opened
+        if open_window:
+            window_result = self.open_window(lib, cell, view=view, view_type=view_type, timeout=effective_timeout)
+            if window_result.status != ExecutionStatus.SUCCESS:
+                return window_result
+        sync_result = self.execute_skill("cv = geGetEditCellView()", timeout=effective_timeout)
+        if sync_result.status != ExecutionStatus.SUCCESS:
+            return sync_result
+        load_result = self.load_il(path, timeout=effective_timeout)
+        if load_result.status != ExecutionStatus.SUCCESS or not save:
+            return load_result
+        save_result = self.save_current_cellview(timeout=effective_timeout)
+        save_result.metadata["load_result"] = load_result.model_dump(mode="json")
+        return save_result
+
+    def execute_operations(self, commands: list[str], *, timeout: int | None = None,
+                           wrap_in_progn: bool = True) -> VirtuosoResult:
+        effective_timeout = timeout if timeout is not None else self._timeout
+        try:
+            script = compose_skill_script(commands, wrap_in_progn=wrap_in_progn)
+        except ValueError as exc:
+            return VirtuosoResult(status=ExecutionStatus.ERROR, errors=[str(exc)])
+        result = self.execute_skill(script, timeout=effective_timeout)
+        result.metadata.setdefault("operation_count", len([c for c in commands if c and c.strip()]))
+        return result
+
+    # -- private helpers ----------------------------------------------------
+
+    def _prepare_il_path(self, path: str | Path) -> tuple[str, bool]:
+        """Return (remote_path, uploaded) where uploaded=False means cache hit."""
+        p = Path(path)
+        if self._tunnel is not None and p.is_file():
+            from virtuoso_bridge.transport.remote_paths import (
+                default_virtuoso_bridge_dir,
+                resolve_client_id,
+                resolve_remote_username,
+            )
+            from virtuoso_bridge.transport.tunnel import _profiled_bridge_leaf
+            work_dir = self._tunnel.remote_work_dir
+            if not work_dir:
+                remote_username = resolve_remote_username(
+                    configured_user=getattr(self._tunnel, '_remote_user', None),
+                    runner=self._tunnel.ssh_runner,
+                )
+                work_dir = default_virtuoso_bridge_dir(
+                    remote_username,
+                    _profiled_bridge_leaf(getattr(self._tunnel, '_profile', None)),
+                    resolve_client_id(getattr(self._tunnel, '_profile', None)),
+                )
+            remote_dir = work_dir.rstrip("/")
+            remote_path = f"{remote_dir}/{p.name}"
+            content = p.read_bytes()
+            md5 = hashlib.md5(content).hexdigest()
+            cached = self._il_upload_cache.get(str(p))
+            if cached and cached[0] == md5:
+                return cached[1], False
+            up = self._tunnel.upload_text(content.decode("utf-8"), remote_path)
+            if up.returncode != 0:
+                raise RuntimeError(f"Failed to upload IL file {p.name}: {up.stderr.strip()}")
+            remote_posix = _path_to_posix(remote_path)
+            self._il_upload_cache[str(p)] = (md5, remote_posix)
+            return remote_posix, True
+        return _path_to_posix(p), False
+
+    def _exchange_payload(
+        self, payload: dict[str, Any], deadline: float, *, max_response_bytes: int | None = None,
+    ) -> bytes:
+        """Send one JSON request and collect the raw response bytes."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(self._remaining_timeout(deadline))
+            logger.debug("TCP connect %s:%d", self._host, self._port)
+            s.connect((self._host, self._port))
+            logger.debug("TCP connected, sending %d-byte payload",
+                         len(json.dumps(payload)))
+            s.settimeout(self._remaining_timeout(deadline))
+            s.sendall(json.dumps(payload).encode("utf-8"))
+            s.shutdown(socket.SHUT_WR)
+            chunks: list[bytes] = []
+            received = 0
+            while True:
+                s.settimeout(self._remaining_timeout(deadline))
+                chunk = s.recv(_RECV_BUF_SIZE)
+                if not chunk:
+                    break
+                received += len(chunk)
+                if max_response_bytes is not None and received > max_response_bytes:
+                    raise OSError("Daemon response exceeds the recoverable receipt size bound")
+                chunks.append(chunk)
+            raw = b"".join(chunks)
+            logger.debug("TCP received %d bytes", len(raw))
+            return raw
+
+    def _build_hello_payload(self) -> dict[str, Any]:
+        nonce = secrets.token_hex(16)
+        self._pending_nonce = nonce
+        payload: dict[str, Any] = {
+            "proto": daemon_auth.PROTOCOL_VERSION,
+            "nonce": nonce,
+            "op": "hello",
+        }
+        if self._daemon_token:
+            payload["mac"] = daemon_auth.hello_mac(self._daemon_token, nonce=nonce)
+        return payload
+
+    @staticmethod
+    def _parse_caps(body: bytes) -> dict[str, Any]:
+        """Parse and strictly type-check a capability payload.
+
+        Malformed payloads (non-JSON, non-object, wrong field types) are
+        refused as authentication failures — never trusted, never crashed on.
+        """
+        try:
+            caps = json.loads(body.decode("utf-8", errors="ignore"))
+        except json.JSONDecodeError:
+            raise daemon_auth.DaemonAuthError(
+                "daemon sent an unparseable capability payload — it predates "
+                "bridge token auth; run `virtuoso-bridge restart` (or re-load "
+                "virtuoso_setup.il in the CIW) to upgrade it"
+            )
+        if not isinstance(caps, dict):
+            raise daemon_auth.DaemonAuthError(
+                "daemon sent a malformed capability payload (expected a JSON "
+                "object)"
+            )
+        proto = caps.get("proto")
+        if not isinstance(proto, int) or isinstance(proto, bool) \
+                or proto != daemon_auth.PROTOCOL_VERSION:
+            raise daemon_auth.DaemonAuthError(
+                f"bridge protocol version mismatch: daemon speaks "
+                f"v{proto!r}, client speaks v{daemon_auth.PROTOCOL_VERSION}"
+            )
+        if caps.get("auth") not in ("on", "off"):
+            raise daemon_auth.DaemonAuthError(
+                "daemon sent a malformed capability payload (bad auth flag)"
+            )
+        pid = caps.get("virtuoso_pid")
+        if pid is not None and (
+            not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
+        ):
+            raise daemon_auth.DaemonAuthError(
+                "daemon sent a malformed capability payload (bad virtuoso_pid)"
+            )
+        return caps
+
+    def _ensure_daemon_capabilities(self, deadline: float, *, refresh: bool = False) -> dict[str, Any]:
+        """Perform the side-effect-free capability handshake exactly once.
+
+        The hello request carries NO ``skill`` field, so nothing can execute
+        on the far end before authentication is settled: an up-to-date daemon
+        answers with signed capabilities, a pre-token daemon fails on the
+        missing key, and any listener that cannot prove token possession is
+        rejected here — before the first real SKILL command is ever sent.
+
+        Raises :class:`daemon_auth.DaemonAuthError` on any mismatch;
+        ``ConnectionRefusedError``/``OSError`` propagate so callers can apply
+        their normal connect-retry policy.
+        """
+        if self._daemon_caps is not None and not refresh:
+            return self._daemon_caps
+        payload = self._build_hello_payload()
+        nonce = payload["nonce"]
+        raw = self._exchange_payload(payload, deadline)
+
+        if raw[:1] == b"\x15":
+            message = raw[1:].decode("utf-8", errors="ignore").strip()
+            if message.startswith("AuthError"):
+                # Authenticated daemon refused our token: it belongs to a
+                # different user (or the token was rotated).
+                raise daemon_auth.DaemonAuthError(message)
+            raise daemon_auth.DaemonAuthError(
+                "daemon did not answer the bridge capability handshake — it "
+                "predates bridge token auth or runs with auth disabled; run "
+                "`virtuoso-bridge restart` (or re-load virtuoso_setup.il in "
+                "the CIW) to upgrade it"
+            )
+        if raw[:1] != b"\x02":
+            raise daemon_auth.DaemonAuthError(
+                "the service behind the port did not answer the bridge "
+                "capability handshake — it is not a bridge daemon"
+            )
+
+        body = raw[1:]
+        if self._daemon_token and daemon_auth.looks_like_hex_mac(body):
+            # Signed capabilities from an auth-enabled daemon: verify, then
+            # strictly type-check.
+            caps = self._parse_caps(
+                daemon_auth.verify_response_bytes(raw, self._daemon_token, nonce)[1:]
+            )
+        elif self._daemon_token:
+            # Unsigned hello reply while we hold a token: either an
+            # explicitly auth-disabled daemon (which cannot sign anything we
+            # could verify) or a pre-token/stale daemon.
+            caps = self._parse_caps(body)
+            if caps.get("auth") != "off":
+                raise daemon_auth.DaemonAuthError(
+                    "daemon did not authenticate its handshake response — "
+                    "run `virtuoso-bridge restart` (or re-load "
+                    "virtuoso_setup.il in the CIW) to upgrade it"
+                )
+            if not daemon_auth.allow_unauthenticated():
+                raise daemon_auth.DaemonAuthError(
+                    "daemon runs with token authentication DISABLED (explicit "
+                    f"{daemon_auth.DAEMON_UNAUTH_OPTIN_ENV}=1 opt-in on the "
+                    "daemon host); refusing an unverifiable channel — set "
+                    f"{daemon_auth.UNAUTH_OPTIN_ENV}=1 to accept"
+                )
+        else:
+            # No token: an authed daemon cannot be talked to at all, and an
+            # auth-disabled daemon is acceptable ONLY when this client was
+            # itself explicitly opted in — a bare constructor is not a
+            # license to run unauthenticated.
+            if daemon_auth.looks_like_hex_mac(body):
+                raise daemon_auth.DaemonAuthError(
+                    "daemon requires bridge token authentication but this "
+                    "client has none"
+                )
+            caps = self._parse_caps(body)
+            if caps["auth"] == "on":
+                raise daemon_auth.DaemonAuthError(
+                    "daemon requires bridge token authentication but this "
+                    "client has none"
+                )
+            if not daemon_auth.allow_unauthenticated():
+                raise daemon_auth.DaemonAuthError(
+                    "daemon runs with token authentication DISABLED; refusing "
+                    "an unauthenticated channel — set "
+                    f"{daemon_auth.UNAUTH_OPTIN_ENV}=1 to explicitly accept "
+                    "insecure legacy mode"
+                )
+
+        # Free identity data from the (signed, when auth is on) handshake.
+        pid = caps.get("virtuoso_pid")
+        if isinstance(pid, int) and pid > 0:
+            self._remote_virtuoso_pid = pid
+        self._daemon_caps = caps
+        return caps
+
+    def _execute_skill_once(
+        self,
+        skill_code: str,
+        timeout: float,
+        deadline: float,
+    ) -> str:
+        # Handshake first: authentication failures must never cost an
+        # execution on a foreign or outdated daemon.
+        self._ensure_daemon_capabilities(deadline)
+        request_timeout = min(timeout, self._remaining_timeout(deadline))
+        payload: dict[str, Any] = {
+            "proto": daemon_auth.PROTOCOL_VERSION,
+            "skill": skill_code,
+            "timeout": request_timeout,
+        }
+        nonce: str | None = None
+        if self._daemon_token:
+            nonce = secrets.token_hex(16)
+            payload["nonce"] = nonce
+            payload["mac"] = daemon_auth.request_mac(
+                self._daemon_token,
+                nonce=nonce,
+                skill=skill_code,
+                timeout=request_timeout,
+            )
+        self._pending_nonce = nonce
+        raw = self._exchange_payload(payload, deadline)
+        if self._daemon_token and nonce:
+            if raw[:1] == b"\x15" and raw[1:].startswith(b"AuthError"):
+                # Authenticated daemon refused our token: it belongs to a
+                # different user (or the token was rotated).  Drop the cached
+                # handshake so a later retry re-negotiates.
+                self._daemon_caps = None
+                raise daemon_auth.DaemonAuthError(
+                    raw[1:].decode("utf-8", errors="ignore").strip()
+                )
+            raw = daemon_auth.verify_response_bytes(raw, self._daemon_token, nonce)
+        return raw.decode("utf-8", errors="ignore")
+
+    @staticmethod
+    def _remaining_timeout(deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise socket.timeout
+        return remaining
+
+    @staticmethod
+    def _should_retry_tunnel_connect(exc: OSError, now: float, connect_deadline: float) -> bool:
+        if now >= connect_deadline:
+            return False
+        retryable_errno = {
+            getattr(errno, "ECONNREFUSED", 111),
+            getattr(errno, "ECONNRESET", 104),
+            getattr(errno, "ENOTCONN", 57),
+        }
+        return getattr(exc, "errno", None) in retryable_errno or "Connection refused" in str(exc)
+
+    @staticmethod
+    def _parse_response(raw: str, elapsed: float) -> VirtuosoResult:
+        if not raw:
+            return VirtuosoResult(status=ExecutionStatus.ERROR, errors=["Empty response from daemon"], execution_time=elapsed)
+        if "TimeoutError" in raw:
+            return VirtuosoResult(status=ExecutionStatus.ERROR, errors=["SKILL execution timeout in Virtuoso"], execution_time=elapsed)
+        if raw.startswith(_STX):
+            return VirtuosoResult(status=ExecutionStatus.SUCCESS, output=raw[1:], execution_time=elapsed)
+        if raw.startswith(_NAK):
+            return VirtuosoResult(status=ExecutionStatus.ERROR, errors=[raw[1:]], execution_time=elapsed)
+        return VirtuosoResult(status=ExecutionStatus.SUCCESS, output=raw, execution_time=elapsed,
+                              warnings=["Response did not contain a standard status marker"])
+
+    # -- cleanup ------------------------------------------------------------
+
+    def close(self) -> None:
+        """Close the bridge. Tunnel cleanup is handled by SSHClient."""
+        if self._tunnel is not None:
+            try:
+                self._tunnel.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

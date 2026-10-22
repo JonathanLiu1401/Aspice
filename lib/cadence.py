@@ -45,11 +45,9 @@ import numpy as np
 # Discovery
 # ---------------------------------------------------------------------------
 
-DEFAULT_EDA_ROOTS = [
-    '/home/lab.apps/vlsiapps_new',      # UW ECE lab (IC23.1, SPECTRE231)
-    '/home/lab.apps/vlsiapps',
-    '/opt/cadence', '/tools/cadence', '/eda/cadence',
-]
+# Generic install prefixes. A site's real tree comes from ASPICE_EDA_ROOTS or
+# references/sites/<name>.env (see lib/site_env.py). No lab path is hardcoded here.
+DEFAULT_EDA_ROOTS = ['/opt/cadence', '/tools/cadence', '/eda/cadence']
 
 # tool -> (env var, candidate paths relative to an EDA root)
 _TOOLS = {
@@ -73,7 +71,8 @@ _LICENSE_VARS = ('CDS_LIC_FILE', 'LM_LICENSE_FILE', 'MGLS_LICENSE_FILE')
 
 
 def eda_roots():
-    env = os.environ.get('ASPICE_EDA_ROOTS')
+    import site_env
+    env = os.environ.get('ASPICE_EDA_ROOTS') or site_env.get('ASPICE_EDA_ROOTS')
     roots = env.split(':') if env else []
     return [r for r in roots + DEFAULT_EDA_ROOTS if r and Path(r).is_dir()]
 

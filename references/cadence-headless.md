@@ -8,7 +8,7 @@ FreePDK45). Each item is a behaviour the backend depends on or works around.
 
 | Thing | Order |
 |---|---|
-| A tool | `ASPICE_<TOOL>` env var -> `PATH` -> `ASPICE_EDA_ROOTS` (colon list) -> built-in roots (`/home/lab.apps/vlsiapps_new`, `/home/lab.apps/vlsiapps`, `/opt/cadence`, ...) |
+| A tool | `ASPICE_<TOOL>` env var -> `PATH` -> `ASPICE_EDA_ROOTS` or the selected site file (`references/sites/`) -> generic prefixes (`/opt/cadence`, `/tools/cadence`, `/eda/cadence`) |
 | Licenses | environment, else `setenv` lines in `<root>/cshrc/licenses.cshrc` |
 | Project | `$ASPICE_PROJECT` -> the registered project whose directory contains the cwd -> the active project (`use_project`) |
 | cds.lib | `ASPICE_CDS_LIB` -> the project's cds.lib -> `cds_lib` from `configure()` -> `./cds.lib` -> `~/cds.lib` -> newest `~/*/cds.lib` |
