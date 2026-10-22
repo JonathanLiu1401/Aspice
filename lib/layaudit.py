@@ -194,3 +194,24 @@ def format_findings(f):
     nw = sum(x[0] == 'WARN' for x in f)
     lines.append('%s: %d FAIL, %d WARN' % ('PASS' if not nf else 'FAIL', nf, nw))
     return '\n'.join(lines)
+
+
+def brief(cellbox, insts, max_masters=16):
+    """One screen of a layout: size and a rollup by master. Not every instance, not every shape."""
+    if cellbox is None:
+        return 'layout: (empty)'
+    w, h = cellbox.w, cellbox.h
+    short = min(w, h)
+    aspect = (max(w, h) / short) if short > 1e-9 else float('inf')
+    lines = ['layout: %.2f x %.2f um   area %.1f um2   aspect %.2f   %d instances' % (
+        w, h, w * h, aspect, len(insts))]
+    by = {}
+    for i in insts.values():
+        by.setdefault(i.master, []).append(i)
+    masters = sorted(by.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    shown = masters[:max_masters]
+    for master, group in shown:
+        lines.append('  %4d  %s' % (len(group), master))
+    if len(masters) > len(shown):
+        lines.append('  +%d more masters' % (len(masters) - len(shown)))
+    return '\n'.join(lines)

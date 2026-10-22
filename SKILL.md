@@ -94,37 +94,28 @@ extraction (189 ps schematic, 1.11 ns PEX). Check every block before it is insta
   testbench format and settings in `references/verify.md`). It exports GDS/CDL in batch, runs PVS DRC/LVS,
   Quantus, and the testbench on the schematic and on each extracted corner, and names the nets with the most
   parasitic C/R. Save the cellviews first.
-- **Close the loop on the layout, not the schematic.** If post-layout misses, move or widen what the worst-net
-  list points at, re-save, re-run. Resizing devices to hide a layout gap only counts if the schematic checks are
-  re-run too. Report the final pre/post table and the number of layout iterations.
-- **Draw it so the loop converges fast:** floorplan first (signal flow, every block as close to square (1:1) as you can make it, never past 2:1, rails on the long
-  edges, never one long row of devices); devices that share a fast or high-impedance node sit next to each other
-  (minimum-width wire is roughly 0.1-0.2 fF/um: if a node's wire cap exceeds its device cap, re-place);
-  matched devices interdigitated or common-centroid with dummies; differential halves mirror-symmetric and routed
-  identically; one preferred direction per metal; clocks and digital lines kept away from or shielded from
-  sensitive analog nodes; taps along every row, guard rings around sensitive blocks; pins on block edges with the
-  schematic's names. Full list: `references/layout-guidelines.md`.
-- **Effort follows speed.** Classify each block (slow bias / medium logic / fast comparator,
-  sampler, clock) and lay out and extract the fast ones first; their wire cap budget is
-  ~10 % of the node cap. Slow blocks are about matching and area.
-- **Area budget and matching are checked, not eyeballed.** State an area budget per
-  block before drawing; dummies at both ends of every matched row; identical devices in
-  pairs, common centroid (ABBA / cross-coupled) or interdigitated units, one symmetry axis.
-  Check with `python <aspice>/scripts/layout_audit.py LIB CELL --area-budget A
-  --pairs-from tb.scs`.
-- **Use the grid, not trial-and-error spacing.** `lib/laygrid.py` (LAYGO-style) measures
-  the PDK's own pcells, places them with rule-derived gaps, builds ABBA/ABAB/dummy rows and
-  routes on tracks, DRC-clean by construction: `references/laygrid.md`. You still choose
-  every row and route.
+- **Close the loop on the generator, not the schematic.** If post-layout misses, change the floorplan or the wire budget in `layout_<cell>.py` and regenerate. Do not nudge shapes, and do not resize devices to hide a layout gap unless the schematic checks are re-run too. Report the final pre/post table and how many times the generator was re-run.
+- **Floorplan the generator must encode:** every block close to square (1:1), never past 2:1, rails on the long edges, never one long row; devices that share a fast or high-impedance node sit together (minimum-width wire is roughly 0.1-0.2 fF/um); matched devices interdigitated or common-centroid with dummies; differential halves mirror-symmetric and routed identically; one direction per metal; clocks kept off sensitive analog nodes; taps along every row; guard rings around sensitive blocks; pins on block edges with the schematic's names. Checklist: `references/layout-guidelines.md`.
+- **Effort follows speed.** Generate and extract the fast blocks first (comparator, sampler, clock); their wire cap budget is ~10 % of the node cap. Slow blocks are about matching and area.
+- **Area and matching are checked.** State an area budget per block before drawing. `python <aspice>/scripts/layout_audit.py LIB CELL --area-budget A --pairs-from tb.scs`.
+
+## Layout is a generator, not a search (hard rule)
+
+Drawing shapes and resimulating is a failed run even if the last iteration meets the spec above. Follow laygo2 (https://laygo2.github.io/overview.html): load the tech grid, generate PDK templates, place, route on tracks, pin, export. Here that is `lib/laygrid.py`. `AGENTS.md` is mandatory. Before inventing a structure, `python <aspice>/scripts/layout_search.py "..."`. Papers in `~/EMiT/papers/`: Han et al., LAYGO, IEEE TCAS-I, March 2021; Guo et al., BAG3++, IEEE OJCAS 2025.
+
+1. **Search, then one floorplan.** Placement and matching: Hastings, *The Art of Analog Layout*, 2nd ed. (2006). Metal grid: Saint & Saint, *IC Mask Design* (2002), and LAYGO. Do not invent a style.
+2. **PDK pcells only.** `laygrid.Template` of the kit's MOSFET, capacitor, and resistor. Never draw a device as rectangles.
+3. **One Python generator per cell** (`layout_<cell>.py`): rows, dummies, centroid, then `tracks` and `connect`. Fix the script and re-run it. Do not patch the database.
+4. **Metal is a grid.** One direction per layer, adjacent layers orthogonal, centerlines and pins on the measured pitch, Manhattan only, via arrays on supplies and tails. If the techfile has multi-pattern colors, a wire stays on one color.
+5. **This ADC is a block, not a chip.** No bond pads, probe pads, pad ring, seal ring, or I/O ESD. Diffusion contacts and vias stay.
+6. **Hand edits are final touches only**, after the generator is DRC-clean. A differential edit applies to both halves.
+7. **Simulate to confirm the generator**, not to pick the next rectangle. One DRC, fast-leaf extract, one short top-level check, one long check. Never open an extracted netlist or a CDL: `python <aspice>/scripts/netbrief.py pex FILE`.
+
+Ship bar: a designer who has laid out analog for decades would accept the block, and the extracted netlist meets the rule above.
 
 ## Spend tokens and wall time on design, not on waiting (rule)
 
-Block-level testbenches before the top level; one corner while iterating; short top-level
-checks (an ADC: <= 16 conversions) and one long run at the end; independent sims in
-parallel in the background; digests instead of raw files; one SKILL call per sheet or
-layout, not per shape; screenshots only to judge a finished drawing. Order: schematic ->
-opcheck -> block tests -> fast-block layout + verify -> rest -> short top test -> long
-test. `references/efficiency.md`.
+Block-level testbenches before the top level; one corner while iterating; short top-level checks (an ADC: <= 16 conversions) and one long run at the end; independent sims in parallel in the background; `scripts/netbrief.py` instead of raw netlists; one generator per cell, not one call per shape; screenshots only to judge a finished drawing. Order: schematic, opcheck, block tests, generator, fast-block verify, assemble, short top test, long test. `references/efficiency.md`.
 
 ## Pick the backend
 

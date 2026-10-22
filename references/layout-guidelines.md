@@ -63,21 +63,38 @@ benchmarks none of the 14 SAR ADC layouts met spec after extraction, while the s
   found in the schematic and checks they are identical, on one row, about one axis, with
   dummies at the row ends; `--groups A=^MA,B=^MB` checks common centroid.
 
-## 4. Routing
+## 4. Routing (a grid, not a drawing)
 
-- One preferred direction per metal layer; route on tracks (pitch = via landing + min
-  spacing). Short, direct routes for critical nets; wider metal or parallel vias where
-  current or resistance matters (supply, tail, switch paths).
-- Clocks and digital lines away from (or shielded from) sensitive analog nodes
-  (comparator inputs, CDAC top plate, bias lines); never parallel over long distances;
-  cross at right angles. For sampling switches, cross-coupled dummy metal can cancel the
-  input-to-hold coupling (LAYGO TI-SAR).
-- Supply: wide VDD/VSS rails, well and substrate taps along every row (latch-up rules),
-  guard rings around sensitive analog blocks.
+The flow is laygo2's: templates on a placement grid, wires on a routing grid
+(`references/layout-kb/13-laygo-flow.md`, https://laygo2.github.io/overview.html).
+`Layout.tracks` and `Layout.connect` are that routing grid. Do not draw polylines.
 
-## 5. Pins
+- One direction per metal. Adjacent layers are orthogonal. Use the PDK's directions if
+  its document names them; otherwise Metal1 horizontal, Metal2 vertical, alternating.
+  Never both directions on one layer.
+- Pitch is what laygrid measured (via landing + minimum spacing, widened by the techfile's
+  width table). Every centerline and every pin center is on that pitch. Off-grid metal is
+  a defect. Manhattan only: a jog is a via onto the other direction.
+- If the techfile defines multi-pattern mask colors (LAYGO's routing-grid coloring), a
+  wire stays on one color.
+- Minimum width for signals. Supplies, tails, and sampling-switch paths are several tracks
+  wide, from the techfile current limit when it has one, and they use via arrays (2x2
+  minimum on supplies). One via is only for a tiny signal.
+- Clocks and digital cross sensitive analog (comparator inputs, CDAC top plate, bias) at
+  right angles and do not run parallel to them. Shields are generated from the same tracks
+  as the pair (grounded metal on both sides, or a grounded layer above), not added after a
+  simulation. For a sampling switch, cross-coupled dummy metal can cancel input-to-hold
+  coupling (LAYGO's TI-SAR).
+- Supply: wide VDD/VSS rails on the long edges, analog and digital supplies kept as
+  separate nets, well and substrate taps along every row, guard rings around the
+  comparator, the CDAC, and the bias.
 
-- Pin shapes on the routing layer at block edges, with names exactly as in the schematic.
+## 5. Pins, and what is not a pin
+
+- This block is not a chip. No bond pads, probe pads, pad openings, seal ring, or I/O ESD.
+  Diffusion contacts and vias are required; they are not pads. Hastings and Baker discuss
+  pad frames as chip-level. Do not copy that onto an ADC block.
+- Pin shapes on the routing layer, on the grid, at the cell edge, with the schematic's names.
 
 ## 6. When post-layout misses
 

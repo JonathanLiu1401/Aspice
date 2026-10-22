@@ -1,209 +1,125 @@
-# aspice - agentic SPICE
+# aspice
 
-A Claude Code skill for transistor-level analog CMOS design and for working with
-Cadence ADE / Spectre netlists, built on [PySpice](https://pyspice.fabrice-salvaire.fr/)
-and [ngspice](https://ngspice.sourceforge.io/) - and, on a machine that has
-Cadence, a headless driver for Spectre, Virtuoso, OCEAN and Calibre so a design
-can be read, checked, edited, simulated with the real PDK and DRC/LVS-verified
-in place.
+Research codebase for the EMiT Lab (UW ECE) on LLM agents that design analog CMOS in
+Cadence Virtuoso: a schematic a person can read, a layout a working designer would ship,
+and a parasitic extraction that still meets spec.
 
-Two things it is meant to fix:
+This is a group project, not a personal hobby wrapper around PySpice and not an
+auto-layout button. The agent writes the generator. The code under `lib/` checks each
+step and keeps netlists small enough to fit in a context window. The rules the agent
+must follow are [`AGENTS.md`](AGENTS.md) (loaded from [`CLAUDE.md`](CLAUDE.md)).
 
-1. **Analog answers that are never checked.** Every result is produced twice -
-   once by hand from the small-signal model, once by simulation - and printed
-   in a reconciliation table. A number that exists only one way is not an
-   answer yet.
-2. **Netlists too large to read.** A real ADE netlist runs to tens of thousands
-   of lines. Parsing it into a compact digest is a ~270x token reduction, so an
-   agent reads a summary and pulls raw text only where it matters.
-3. **Going back and forth to the Cadence machine.** When Cadence is installed
-   locally, `lib/cadence.py` runs it headlessly in scratch directories: no file
-   shuttling, and nothing in your libraries or `~/simulation` is written.
+The benchmark that runs those agents lives outside this repo, in `~/EMiT/virtuoso-mcp-eval`.
+The two layout papers the method is built on are in `~/EMiT/papers/` (LAYGO, BAG3++).
+The flow those papers and [laygo2](https://laygo2.github.io/overview.html) describe is
+implemented here by `lib/laygrid.py`.
 
-## What is in it
+## What an agent is required to do
 
-| Module | Purpose |
+- Draw schematics by hand, wires between terminals, not a grid of net labels.
+- Prove the operating point (Razavi regions) with `scripts/opcheck.py` before layout.
+- Generate layout from PDK pcells on a metal grid. One Python file per cell. No bond
+  pads on a block. No draw-and-resimulate loop. Search
+  `scripts/layout_search.py` before inventing a structure.
+- Sign off with `scripts/verify.py` (DRC, LVS, Quantus, pre vs post).
+- Read `scripts/netbrief.py`, never a raw netlist.
+
+## What is in the repo
+
+| Piece | Role |
 |---|---|
-| `lib/analog_spice.py` | Operating points with per-device small-signal parameters and region checks, AC/Bode with gain-bandwidth extraction, noise with per-device contributions, DC sweeps, transient, bias solving, fT measurement, hand-vs-SPICE reconciliation |
-| `lib/spectre_netlist.py` | Spectre/ADE netlist parser and writer with byte-identical round-trip; edits change only the affected line |
-| `lib/netlist_digest.py` | Progressive-disclosure views of a large netlist: outline, summary, device rollup, net reports, dangling-node detection, digest diffing |
-| `lib/spectre_to_ngspice.py` | Translates a Spectre netlist to an ngspice deck, simulates it, tunes knobs to hit targets, and writes the result back for re-export |
-| `lib/netlist_export.py` | Describe a circuit once; emit CDL and Spectre with the PDK's CDF names for Cadence, and a SPICE deck that simulates locally |
-| `lib/pdk.py` | Scan a PDK you supply: model files, corners, device names, model families; probe a device to confirm it biases |
-| `lib/plots.py` | Design charts from a real PDK: I-V families, transfer curves, the gm/ID chart, Bode with phase margin, target sweeps |
-| `lib/cadence.py` | Headless Cadence: tool/license discovery and `doctor()`; Spectre runs with PSF parsing (op, sweeps, AC, oppoint device tables); ADE/Maestro result reading incl. PSF XL; schematic read / schCheck / build / edit-on-a-copy; OCEAN netlisting; layout read, stream in/out; Calibre DRC/LVS; real-PDK device probing; Spectre-vs-ngspice cross-check |
+| `AGENTS.md` | Project rules. Read this first |
+| `SKILL.md` | Claude Code skill: schematic, operating point, layout, sign-off |
+| `references/layout-kb/` | Searchable layout technique cards, citing Hastings, Saint & Saint, LAYGO, BAG3++, laygo2. Not the books themselves |
+| `lib/laygrid.py`, `lib/layaudit.py` | Template-and-grid layout generator and the floorplan audit |
+| `lib/aspverify/` , `scripts/verify.py` | Batch DRC, LVS, Quantus, pre/post comparison |
+| `lib/opcheck.py` | Spectre operating-point check |
+| `lib/netlist_digest.py`, `lib/netbrief.py` | Compact schematic and extracted-netlist views |
+| `lib/analog_spice.py` and the Spectre parser | Hand analysis and ADE netlists, including on a machine without Cadence |
+| `lib/cadence.py` | Headless Spectre, Virtuoso, OCEAN, Calibre, on a machine that has them |
 
-Plus 19 realistic ADE netlists with ground-truth JSON in `corpus/`, three
-verified worked examples in `examples/`, and reference material in
-`references/`.
+`student` branch adds a class mode that refuses to do topology and sizing for a student.
+Layout and sign-off rules are the same on both branches.
 
 ## Setup
 
-Requires Python 3, PySpice 1.4.3 and ngspice (>= 33; tested on 44.2 and 47).
+Python 3, PySpice 1.4.3, ngspice >= 33 (tested on 44 and 47). On the lab account the
+venv is `~/.claude/skills-venv`.
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install "PySpice==1.4.3"   # Linux/macOS: .venv/bin/python
-python scripts/fetch_models.py      # download the transistor models
+.venv/bin/python -m pip install "PySpice==1.4.3"
+python scripts/fetch_models.py      # PTM cards; not a foundry PDK
 ```
 
-`analog_spice` patches two PySpice/ngspice incompatibilities at import time, so
-import it rather than importing PySpice directly:
+```bash
+python scripts/analog_selftest.py
+python scripts/test_parser.py
+python scripts/test_digest.py
+python scripts/test_opcheck.py
+python scripts/test_laygrid.py
+python scripts/test_layaudit.py
+python scripts/test_netbrief.py
+python scripts/test_layout_search.py
+python scripts/test_verify.py       # needs the bridge package for the host tests
+```
 
-- PySpice 1.4.3 treats every ngspice stderr line that is not prefixed
-  `Warning:` as fatal. ngspice >= 40 sends benign `Note:` lines there, so a
-  perfectly good `.ac` or `.tran` raises after the analysis already succeeded.
-- PySpice's vector-type table stops at ngspice 32, producing a spurious
-  "Unsupported Ngspice version" warning on anything newer.
+Layout search uses the technique cards by keyword with no extra install. To add semantic
+rank, with [Ollama](https://ollama.com/) already running locally:
 
-### Transistor models
+```bash
+ollama pull nomic-embed-text
+python scripts/layout_search.py --build
+python scripts/layout_search.py "shield the CDAC top plate"
+```
 
-Model cards are **not** included. `scripts/fetch_models.py` downloads the
-Predictive Technology Model cards (180 nm down to 22 nm) and normalises every
-card's devices to `nch` / `pch`, so a circuit changes technology node by
-changing one `tech()` call.
+## Layout method (short)
 
-PTM originated at ptm.asu.edu, which is offline; the script pulls from a
-third-party mirror that carries no licence, which is exactly why the files are
-fetched rather than vendored here. They are predictive academic models, not a
-foundry PDK - good for studying trends and checking hand analysis, not for
-signing off silicon.
+1. Floorplan from the technique cards. Hastings for matching, laygo2 / LAYGO for the grid.
+2. `layout_<cell>.py` places PDK pcells and routes on tracks.
+3. One DRC, fix the script, extract the fast leaves, then the block.
+4. The ADC is not a chip: no bond pads.
 
-## Usage
+`references/laygrid.md` and `AGENTS.md` are the full version.
+
+## Netlists
 
 ```python
 import sys; sys.path.insert(0, 'lib')
-from analog_spice import *
-
-def build(vin):
-    c = Circuit('cs')
-    c.include(tech('180nm'))
-    c.V('dd', 'vdd', c.gnd, 1.8 @ u_V)
-    c.V('b',  'vb',  c.gnd, 0.9 @ u_V)
-    c.V('in', 'in',  c.gnd, float(vin) @ u_V)
-    c.MOSFET(1, 'out', 'in', c.gnd, c.gnd, model='nch', w=20e-6, l=0.5e-6)
-    c.MOSFET(2, 'out', 'vb', 'vdd', 'vdd', model='pch', w=40e-6, l=0.5e-6)
-    return c
-
-vin, op = solve_bias(build, 'out', 0.9, low=0.3, high=1.2)
-op.check_saturation()      # prove the region before trusting anything else
-op.table()                 # gm, gmb, ro, gm/ID, gm*ro per device
-```
-
-For netlists:
-
-```python
 import spectre_netlist as SN, netlist_digest as ND
-
 nl = SN.parse_file('design.scs')
-print(ND.outline(nl))                  # start cheap
-print(ND.net_report(nl, 'vout'))       # escalate only where needed
-SN.set_param(nl, 'Wn', '4u')
-open('tuned.scs', 'w').write(SN.write_netlist(nl))   # only that line changed
+print(ND.outline(nl))
 ```
 
-## Verifying the install
+Or, without opening the file in the conversation:
 
 ```bash
-python scripts/analog_selftest.py     # 13 groups vs closed-form answers
-python scripts/test_parser.py         # 151 parser tests
-python scripts/test_digest.py         # 33 digest tests
-python scripts/test_integration.py    # parser + digest over the whole corpus
-python scripts/test_translate.py      # translate / simulate / tune tests
-python scripts/test_export.py         # netlist generation and export
-python scripts/test_pdk_plots.py      # PDK scanning and design charts
-python scripts/test_cadence.py        # headless Cadence (live parts SKIP without it)
-python scripts/bench_tokens.py        # compression benchmark
-python scripts/cadence_loop.py        # end to end on YOUR Cadence data (read-only)
+python scripts/netbrief.py scs design.scs
+python scripts/netbrief.py pex extracted.sp
 ```
 
-The self-test compares against independently computed answers rather than
-golden files: a resistive divider, an RC corner frequency, an RC step at one
-time constant, `.tf` gain/Rin/Rout, resistor thermal noise against 4kTR,
-square-law Id/gm/gds against the closed-form bias solution, region detection,
-and fT against a measured current gain.
+## Cadence on the lab machines
 
-## Things worth knowing
+Heavy Cadence I/O on NFS has stalled hosts. Run Spectre, DRC, LVS, and Quantus on a
+local copy under `/var/tmp`, never on an NFS design, and never write `~/EE332`,
+`~/EE476`, `~/simulation`, or `~/EMiT/cadence` unless the user asked. Kill Cadence by
+PID. Never `kill -9` a process in D state, and never `pkill -f` with a pattern that
+matches the command itself.
 
-Found by measurement while building this, and encoded in the tools:
+`scripts/verify.py` is the sign-off path. `lib/cadence.py` is the headless path for
+reading and simulating a cell. From a machine without Cadence, `scripts/lab_run.py`
+runs a deck on a lab host.
 
-- **ngspice reads a trailing `A` as atto (1e-18) and `F` as femto (1e-15).**
-  PySpice renders `100e-6 @ u_A` as `0.0001A`, which simulates as 1e-22 A - a
-  dead circuit, no warning. `lint_netlist` runs before every analysis and
-  refuses the netlist.
-- **fT cannot be computed from the reported capacitances.** ngspice publishes
-  BSIM4's intrinsic charge-model capacitances, excluding gate overlap. At 45 nm
-  `gm/(2*pi*(|Cgs|+|Cgd|))` gives 644 GHz where the measured `|h21| = 1`
-  crossing is 287 GHz. `f_t()` measures it.
-- **`show` output is truncated to ~6 significant figures.** Device parameters
-  are re-read as raw doubles via ngspice vectors, in the same simulation.
-- **A single-frequency `.noise` run silently omits the per-device breakdown.**
-  Sweep at least a decade.
-- **In Spectre `M` is mega; in SPICE it is milli.** A silent 1e9 error.
-- **A PDK's `w` is a finger width in one process and a total width in another.**
-  Sizing is therefore always expressed as `w_f` (per finger) and `n_f` (count),
-  and a total-width parameter is computed, never assumed.
-- **`gnd` is not ground in Spectre** (only `0` is), but ngspice grounds it. The
-  translator renames it. ADE's parenthesized literals (`r=(1M)`) are unwrapped
-  so `M` stays mega.
-- **The simulators agree, the models do not.** One BSIM4 card in Spectre and in
-  ngspice: within 0.05%. PTM 45nm vs gpdk045 at the same bias: 3-60x apart at
-  L=45n. See `references/cadence-headless.md`.
-- **Reading a target off a swept curve is not accurate enough.** Linear
-  interpolation between sweep points missed a 0.9 V target by 110 mV on a steep
-  width sweep, so crossings are refined by bisection.
+## Things the tools already encode
 
-## PDKs
-
-No PDK is bundled. Cadence GPDK kits are proprietary and licensed, not open
-source, so `pdk.scan()` reads a directory you already have. Genuinely open PDKs
-work the same way and are listed in `pdk.OPEN_PDKS`: FreePDK45 (Apache 2.0, the
-closest open analogue to gpdk045), SkyWater sky130, GF180MCU, IHP SG13G2.
-
-## Verifying it without Cadence
-
-    python scripts/offline_loop.py
-
-Walks the full round trip on a Virtuoso-style netlist with a `$PDK` include:
-ingest, byte-identical round trip, digest, substitute an open model card for
-the licensed PDK, bias in ngspice, tune two knobs to an output-common-mode
-spec, re-export a configured ADE netlist that still points at the real PDK,
-and re-simulate from the exported file to confirm it holds. No Cadence, no
-Spectre, no proprietary PDK.
-
-## Using Cadence on the same machine
-
-```python
-import cadence as CD
-print(CD.doctor())                                   # tools, licenses, cds.lib
-CD.configure(cds_lib='~/EE332/cadence/cds.lib')     # pin the project once
-r = CD.simulate_cell('lab5', '5ota_tb', analyses='dcOp dc\ndcOpInfo info what=oppoint where=rawfile\n')
-print(r.device_table())                              # regions, gm/Id, gm*ro from Spectre
-cl = CD.copy_cell('lab3', 'inverter')                # edits go to a scratch copy
-CD.edit_instance_params(CD.SCRATCH_LIB, 'inverter', {'PM0': {'w': '520n'}}, cds_lib=cl)
-CD.calibre_lvs('top.gds', 'top', 'top.src.net', 'kit/calibreLVS.rul')
-```
-
-Measured on the UW ECE lab install (IC23.1, Spectre 23.1, Calibre 2021.1,
-gpdk045): 381 unique ADE netlists parse, round-trip and translate; re-running
-stored ADE points in Spectre reproduces the stored results to 3e-16 V; DRC and
-LVS reproduce Calibre Interactive's reports.
-
-## Scope and limits
-
-- **Without Cadence**, netlists are simulated with ngspice, so simulating a
-  Spectre netlist is a translation and the translation reports what it dropped.
-  A model swap moves the operating point (`scripts/offline_loop.py` shows it),
-  so never carry a bias point across one.
-- **With Cadence**, Spectre and the real PDK answer directly. Not covered:
-  `spiceIn` (`build_schematic` replaces it), PEX, PVS decks (gpdk045's own
-  DRC/LVS), and post-processing of `stb`/`pss`/Monte Carlo beyond raw PSF.
-- PTM models are predictive and academic. Each is extracted at its node's
-  nominal channel length, so a much longer L is an extrapolation.
-- The flicker-noise parameters are absent from the PTM cards, so 1/f
-  contributions come back as exactly zero. Thermal noise is modelled properly.
+- ngspice reads a trailing `A` as atto and `F` as femto. `lint_netlist` refuses that.
+- fT from reported capacitances ignores overlap; `f_t()` measures it.
+- In Spectre `M` is mega; in SPICE it is milli.
+- A PDK `w` is a finger width in one kit and a total width in another. Size as finger width and finger count.
+- `gnd` is not ground in Spectre. The translator renames it.
+- The same BSIM4 card agrees across Spectre and ngspice to about 0.05 %. PTM-45nm and gpdk045 at the same bias do not. A PTM number is not a gpdk045 prediction.
 
 ## Licence
 
-MIT, see `LICENSE`. Transistor model cards are downloaded at setup time and are
-not covered by it.
+MIT, see `LICENSE`. PTM cards are downloaded at setup and are not covered. The technique
+cards cite textbooks and papers; those works are not included.

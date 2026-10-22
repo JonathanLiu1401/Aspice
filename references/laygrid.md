@@ -2,10 +2,14 @@
 
 Hand-placing shapes and guessing spacings is where agent layouts went wrong: one long row
 of devices, gaps chosen by trial and error against DRC, unmatched halves. `lib/laygrid.py`
-follows LAYGO (Han et al., TCAS-I 2021) and BAG (Chang et al.; BAG3++, Guo et al., OJCAS
-2025): **you write the layout generator; laygrid makes each step DRC-clean by
-construction and symmetric by pattern.** It is an API, not an auto-placer: every device,
-row and route is a call you choose.
+is this repo's implementation of the laygo2 flow (https://laygo2.github.io/overview.html):
+load the tech grid, generate PDK templates, place, route on tracks, pin, export.
+It follows LAYGO (Han et al., IEEE TCAS-I, March 2021, DOI 10.1109/TCSI.2020.3046524)
+and BAG3++ (Guo et al., IEEE OJCAS 2025, DOI 10.1109/OJCAS.2024.3502641). Both papers
+are in `~/EMiT/papers/`. **You write the layout generator; laygrid makes each step
+DRC-clean by construction and symmetric by pattern.** It is not an auto-placer, and it
+is not a license to draw devices by hand: every device is a PDK pcell, every route is a
+track. Off-grid metal and a hand-drawn transistor are failures. The rules are `AGENTS.md`.
 
 | Step | What laygrid does | Source of the numbers |
 |---|---|---|
