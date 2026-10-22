@@ -46,6 +46,19 @@ uses net labels, including the ones in `references/virtuoso/`.
   every pin), redraw it before you go on. Simulating an unreadable schematic does not count as progress.
   Details and a worked pattern: `references/schematic-drawing.md`.
 
+## A finished schematic must sit at a Razavi operating point (hard rule)
+
+Meeting the specs in one testbench is not enough. Before layout, and after any resize, run
+`python <aspice>/scripts/opcheck.py tb.scs` (any Spectre deck or ADE `input.scs`; `--at
+t1,t2` for clocked circuits, `--sections tt,ss,ff --temps -40,27,125` at the end). It reads
+Spectre's own oppoint and FAILS any analog device in triode/off; it warns on headroom
+|Vds|-|Vdsat| < 100 mV, gm/Id outside 5-25, gm*ro < 10, a differential pair built from
+unequal devices or unbalanced at the balanced input, and a mirror whose ratio, L or unit
+finger width is off. Fix the design until PASS with no headroom warning at every corner,
+and put the device table in your result. Earlier benchmark OTAs that met their specs had a
+tail device 4-5 mV from triode and an input pair of two different devices. Details:
+`references/opcheck.md`.
+
 ## Any layout you create must perform like its schematic (hard rule)
 
 DRC clean + LVS MATCH is not done. A layout is done when its **extracted (PEX) netlist meets the same specs as the
@@ -68,6 +81,27 @@ extraction (189 ps schematic, 1.11 ns PEX). Check every block before it is insta
   identically; one preferred direction per metal; clocks and digital lines kept away from or shielded from
   sensitive analog nodes; taps along every row, guard rings around sensitive blocks; pins on block edges with the
   schematic's names. Full list: `references/layout-guidelines.md`.
+- **Effort follows speed.** Classify each block (slow bias / medium logic / fast comparator,
+  sampler, clock) and lay out and extract the fast ones first; their wire cap budget is
+  ~10 % of the node cap. Slow blocks are about matching and area.
+- **Area budget and matching are checked, not eyeballed.** State an area budget per
+  block before drawing; dummies at both ends of every matched row; identical devices in
+  pairs, common centroid (ABBA / cross-coupled) or interdigitated units, one symmetry axis.
+  Check with `python <aspice>/scripts/layout_audit.py LIB CELL --area-budget A
+  --pairs-from tb.scs`.
+- **Use the grid, not trial-and-error spacing.** `lib/laygrid.py` (LAYGO-style) measures
+  the PDK's own pcells, places them with rule-derived gaps, builds ABBA/ABAB/dummy rows and
+  routes on tracks, DRC-clean by construction: `references/laygrid.md`. You still choose
+  every row and route.
+
+## Spend tokens and wall time on design, not on waiting (rule)
+
+Block-level testbenches before the top level; one corner while iterating; short top-level
+checks (an ADC: <= 16 conversions) and one long run at the end; independent sims in
+parallel in the background; digests instead of raw files; one SKILL call per sheet or
+layout, not per shape; screenshots only to judge a finished drawing. Order: schematic ->
+opcheck -> block tests -> fast-block layout + verify -> rest -> short top test -> long
+test. `references/efficiency.md`.
 
 ## Pick the backend
 
