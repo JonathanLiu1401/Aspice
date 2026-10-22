@@ -752,7 +752,9 @@ class Layout:
         if area_budget and area > area_budget:
             lines.append('OVER BUDGET: %.1f um2 > %.1f um2' % (area, area_budget))
         if asp > 2.0:
-            lines.append('aspect ratio %.2f > 2: fold the long rows' % asp)
+            lines.append('aspect ratio %.2f > 2 (hard limit): fold the long rows; aim for 1:1' % asp)
+        elif asp > 1.5:
+            lines.append('aspect ratio %.2f: aim for 1:1 (fold a row, stack halves)' % asp)
         return '\n'.join(lines)
 
     def centroids(self, prefix_by_group):

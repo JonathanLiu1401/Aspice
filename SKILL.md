@@ -74,7 +74,7 @@ extraction (189 ps schematic, 1.11 ns PEX). Check every block before it is insta
 - **Close the loop on the layout, not the schematic.** If post-layout misses, move or widen what the worst-net
   list points at, re-save, re-run. Resizing devices to hide a layout gap only counts if the schematic checks are
   re-run too. Report the final pre/post table and the number of layout iterations.
-- **Draw it so the loop converges fast:** floorplan first (signal flow, aspect at most 2:1, rails on the long
+- **Draw it so the loop converges fast:** floorplan first (signal flow, every block as close to square (1:1) as you can make it, never past 2:1, rails on the long
   edges, never one long row of devices); devices that share a fast or high-impedance node sit next to each other
   (minimum-width wire is roughly 0.1-0.2 fF/um: if a node's wire cap exceeds its device cap, re-place);
   matched devices interdigitated or common-centroid with dummies; differential halves mirror-symmetric and routed
