@@ -60,6 +60,7 @@ def main(argv=None):
     run = LG.batch_runner(cds_lib=str(Path(a.cds_lib).resolve()))
     cellbox, insts = LA.read_layout(run, a.lib, a.cell, a.view)
     f = LA.audit(cellbox, insts, a.area_budget, pairs, groups, a.device_re, lib=a.lib, leaf_height=a.leaf_height)
+    print(LA.brief(cellbox, insts))
     print(LA.format_findings(f))
     return 1 if any(x[0] == 'FAIL' for x in f) else 0
 

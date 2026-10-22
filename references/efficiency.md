@@ -15,15 +15,18 @@ screenshots, re-reading big files, and one-call-per-shape GUI edits. Rules:
 4. Use `.measure` / scalar outputs; never print waveforms into the context.
 
 **Reading**
-5. Never read a netlist, PSF, log or DRC report raw: use the digests (`netlist_digest`,
-   `SpectreResult.summary()`, verify's PASS/FAIL lines, `--brief` / `--json` and grep).
+5. Never read a netlist, PSF, log or DRC report raw. Schematic: `scripts/netbrief.py scs FILE`
+   (outline and device rollup, about the digest's token cut). Extracted layout: `scripts/netbrief.py pex FILE`
+   (counts plus the worst parasitic nets). Layout geometry: `layout_audit.py` prints a master rollup, not every
+   shape. verify's PASS/FAIL lines are the sign-off view.
 6. Read a file once; keep the numbers you need in your notes instead of re-opening it.
 7. Screenshots only to judge a drawing (one per finished sheet or layout), not to check
    state: query the database instead (`CD.layout`, `schematic`, bridge readback).
 
 **Editing**
-8. Batch edits: one SKILL file / one `execute_skill` per sheet or layout cell, not one
-   call per wire or shape. Generate a layout with laygrid and write it in one call.
+8. The layout is one Python generator per cell (`layout_<cell>.py` via laygrid), written
+   once and re-run. Not one SKILL call per shape, and not a GUI loop. Hand edits are final
+   touches after that generator is DRC-clean. See `AGENTS.md`.
 9. Save, then run batch tools (verify, opcheck) from the shell; they do not touch the GUI.
 10. Fix the cause the checker names; do not re-run an unchanged design hoping for a
     different number.

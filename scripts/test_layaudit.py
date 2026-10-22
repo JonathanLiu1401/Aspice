@@ -28,6 +28,14 @@ class T(unittest.TestCase):
         self.assertNotIn(('FAIL', 'sarlib/comp'), where)
         self.assertFalse(any(x[2] == 'gpdk/nmos' for x in f))     # PDK cells are not blocks
 
+    def test_brief_rolls_up_masters(self):
+        insts = {('M%d' % i): inst('M%d' % i, 'pdk/nmos', i * 1.0, 0, 0.5, 1.0) for i in range(20)}
+        insts['I0'] = inst('I0', 'sarlib/cdac', 0, 2, 40, 20)
+        text = LA.brief(Rect(0, 0, 20, 22), insts)
+        self.assertIn('21 instances', text)
+        self.assertIn('20  pdk/nmos', text)
+        self.assertNotIn('M0', text)
+
     def test_leaf_height_exempts_standard_cell_rows(self):
         insts = {'X': inst('X', 'lib/dffnr', 0, 0, 5.9, 2.3)}
         f = LA.audit(Rect(0, 0, 6, 6), insts, lib='lib', leaf_height=2.5)
