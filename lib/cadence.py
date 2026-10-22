@@ -122,7 +122,7 @@ def load_config():
 
 
 def configure(**settings):
-    """Persist settings (e.g. ``cds_lib='~/EE332/cadence/cds.lib'``) to
+    """Persist settings (e.g. ``cds_lib='path/to/cds.lib'``) to
     ~/.config/aspice/cadence.json. Values of None remove a key."""
     cfg = load_config()
     for k, v in settings.items():

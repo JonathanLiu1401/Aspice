@@ -101,8 +101,8 @@ python scripts/netbrief.py pex extracted.sp
 ## Cadence on the lab machines
 
 Heavy Cadence I/O on NFS has stalled hosts. Run Spectre, DRC, LVS, and Quantus on a
-local copy under `/var/tmp`, never on an NFS design, and never write `~/EE332`,
-`~/EE476`, `~/simulation`, or `~/EMiT/cadence` unless the user asked. Kill Cadence by
+local copy under `/var/tmp`, never on an NFS design, and never write a library
+you were not asked to edit. Kill Cadence by
 PID. Never `kill -9` a process in D state, and never `pkill -f` with a pattern that
 matches the command itself.
 
