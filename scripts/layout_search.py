@@ -101,6 +101,9 @@ def _load_index():
 
 def search(query, k=4):
     rows = cards()
+    if not rows:
+        print('no technique cards found')
+        return 1
     kw = keyword_scores(query, rows)
     sem = [0.0] * len(rows)
     how = 'keyword'

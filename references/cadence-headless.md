@@ -15,7 +15,7 @@ FreePDK45). Each item is a behaviour the backend depends on or works around.
 | Extra env | the project's `env` (e.g. `PDK_DIR`) is applied to every tool run and to `$VAR` expansion in cds.lib |
 
 Projects live in `~/.config/aspice/cadence.json`:
-`CD.add_project('EE476', '~/EE476/cadence/cds.lib', env={'PDK_DIR': ...})`.
+`CD.add_project('name', 'path/to/cds.lib', env={'PDK_DIR': ...})`.
 A csh `setenv` in `~/.cshrc` does not reach aspice (its tools run from Python,
 not a login csh), which is why a project carries its own env.
 

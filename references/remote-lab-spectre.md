@@ -1,14 +1,16 @@
-# Spectre on the UW ECE lab from another computer (Windows, macOS, Linux)
+# Spectre on a remote lab host from another computer
 
 `scripts/lab_run.py` lets an agent on any computer simulate on a lab Linux host
 with the real PDKs. The client needs **Python 3.8+ and the OpenSSH client** -
-no Cadence, no virtuoso-bridge, no numpy. The lab side reuses aspice's
-`lib/cadence.py` from your NFS home, so nothing is installed per host.
+no Cadence, no virtuoso-bridge, no numpy. Host names and kit paths are not in
+the script. Set `ASPICE_SITE` to a file such as `references/sites/uw.env`, or
+set `ASPICE_LAB_HOSTS` and `ASPICE_KIT_ROOT`. The lab side reuses this repo's
+`lib/cadence.py` from the path in `ASPICE_REMOTE_ASPICE`.
 
 What one `run` does:
 
-1. ranks `linux-lab-136..145` by NFS latency (20x write+stat), load and Cadence
-   processes, and skips sick hosts (NFS > 0.3 s);
+1. ranks the hosts in `ASPICE_LAB_HOSTS` by NFS latency (20x write+stat), load
+   and Cadence processes, and skips sick hosts (NFS > 0.3 s);
 2. stages the deck plus every relative include into one flat folder (CRLF ->
    LF, `../` paths rewritten), uploads it to `/var/tmp/$USER/aspice-remote/<id>`
    on that host (local disk, never NFS);
@@ -26,7 +28,7 @@ Do these with the user; steps 2-3 need their password once.
    prompt is a failure, not a hang):
    ```powershell
    ssh-keygen -t ed25519            # accept defaults
-   type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh NETID@linux-lab-143.ece.uw.edu "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+   type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh NETID@<a host from ASPICE_LAB_HOSTS> "mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
    ```
    The lab home is shared NFS, so one key works on every lab host.
 3. **ssh config** `%USERPROFILE%\.ssh\config`, so `--user` is never needed:
@@ -40,16 +42,17 @@ Do these with the user; steps 2-3 need their password once.
    connect UW's Husky OnNet VPN, or pass `--jump NETID@<a UW host you can reach>`.
 5. **The script.** Only `scripts/lab_run.py` is needed on the client. Copy it,
    or the whole skill:
-   `scp -r NETID@linux-lab-143.ece.uw.edu:.claude/skills/aspice %USERPROFILE%\.claude\skills\`
-   (`references/virtuoso` is a Linux symlink and will be missing; it is only
-   for live Virtuoso sessions.)
+   Clone this repository. `references/virtuoso/` and `third_party/virtuoso-bridge-lite/`
+   are files in the repo, not a symlink into someone's home directory.
 
 Check: `python lab_run.py hosts` prints a table of hosts with `ok True`.
 
-## The PDKs on the lab machines
+## The PDKs
 
-`python lab_run.py pdks --check linux-lab-143` prints these and confirms each
-file exists. Paths are lab paths: use them as-is in the deck, they are not uploaded.
+`python lab_run.py pdks --check <host>` prints the include lines from the
+selected site file and confirms each file exists. Paths are paths on that
+host: use them as-is in the deck, they are not uploaded. The table below is
+the UW ECE site (`references/sites/uw.env`), not every installation.
 
 | PDK | Include line | Corners | Core devices |
 |---|---|---|---|
