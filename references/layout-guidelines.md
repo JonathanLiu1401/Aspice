@@ -32,7 +32,15 @@ benchmarks none of the 14 SAR ADC layouts met spec after extraction, while the s
 
 ## 2. Floorplan
 
-- Blocks in signal-flow order, aspect ratio at most 2:1, power rails on the long edges.
+- **Aim for square (1:1) - every block, not just the top cell.** A square block has the shortest
+  worst-case wire for its area; 2:1 is the hard limit (the audit fails above it, warns above
+  1.5). Measured in the phase-2 benchmark: both bridge-lite agents kept the top cell under 2:1
+  (1.5-1.6) but drew the CDAC at 2.6-2.8:1 and a sampling switch at 3.7:1. Fold rows (two
+  rows of ABBA instead of one ABBAABBA), split a differential array into halves stacked
+  around the comparator rather than in one strip, and pick the row count before placing.
+  Only standard-cell-height logic leaf cells (one inverter, one flip-flop) are exempt; tile
+  them into a square logic block.
+- Blocks in signal-flow order, power rails on the long edges.
   Never lay out a block as one long row: fold rows (two rows of ABBA instead of one
   ABBAABBA; cross-coupled 2-D arrays for pairs).
 - Lay out leaf cells first and instantiate them; keep the schematic's hierarchy.

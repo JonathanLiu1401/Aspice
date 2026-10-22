@@ -4,7 +4,8 @@ nets on their terminals) through a laygrid runner (batch Virtuoso or the bridge)
 
 Checks (each a FAIL / WARN / INFO finding):
   area        bounding-box area against a budget you give (--area-budget um2)
-  aspect      longest side / shortest side <= 2
+  aspect      target 1:1 for the cell AND every sub-block of this library in it: WARN above
+              1.5, FAIL above 2 (standard-cell-height leaf cells, --leaf-height, are exempt)
   utilisation device area / cell area (low = devices far apart = long wires)
   rows        a row longer than 4x the cell height is "one long row": fold it
   dummies     every row that holds matched devices starts and ends with a dummy
@@ -88,7 +89,7 @@ def rows_of(insts, tol=1e-3):
     return rows
 
 
-def audit(cellbox, insts, area_budget=None, pairs=(), groups=None, device_re=None):
+def audit(cellbox, insts, area_budget=None, pairs=(), groups=None, device_re=None, lib=None, leaf_height=None):
     """Return findings [(level, rule, where, message)]."""
     f = []
     devs = [i for i in insts.values() if not device_re or re.search(device_re, i.master)]
@@ -104,7 +105,24 @@ def audit(cellbox, insts, area_budget=None, pairs=(), groups=None, device_re=Non
         f.append((lvl, 'area', '-', 'area %.1f um2 vs budget %.1f um2 (%.0f %%)' % (
             area, area_budget, 100 * area / area_budget)))
     if asp > 2.0:
-        f.append(('WARN', 'aspect', '-', 'aspect ratio %.2f > 2: fold rows or stack blocks' % asp))
+        f.append(('FAIL', 'aspect', '-', 'aspect ratio %.2f > 2: fold rows or stack blocks; aim for 1:1' % asp))
+    elif asp > 1.5:
+        f.append(('WARN', 'aspect', '-', 'aspect ratio %.2f: aim for 1:1' % asp))
+    seen = {}
+    for i in insts.values():
+        if i.master in seen or (lib and not i.master.startswith(lib + '/')):
+            continue
+        seen[i.master] = i
+    for m, i in sorted(seen.items()):
+        w, h = i.bbox.w, i.bbox.h
+        if min(w, h) <= 0 or (leaf_height and min(w, h) <= leaf_height + 1e-6):
+            continue
+        a = max(w, h) / min(w, h)
+        if a > 2.0:
+            f.append(('FAIL', 'aspect', m, 'sub-block %.1f x %.1f um, aspect %.2f > 2: re-floorplan it '
+                      'toward 1:1' % (w, h, a)))
+        elif a > 1.5:
+            f.append(('WARN', 'aspect', m, 'sub-block %.1f x %.1f um, aspect %.2f: aim for 1:1' % (w, h, a)))
     if util < 0.3:
         f.append(('WARN', 'utilisation', '-', 'devices cover %.0f %% of the cell: compact the '
                   'placement (empty area is wire length)' % (100 * util)))

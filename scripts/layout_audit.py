@@ -50,6 +50,7 @@ def main(argv=None):
     ap.add_argument('--pairs-from', help='Spectre deck: take diff pairs and mirrors from opcheck')
     ap.add_argument('--groups', help='name=regex,... split devices whose centroids must coincide')
     ap.add_argument('--device-re', help='regex on lib/cell of instances that count as devices')
+    ap.add_argument('--leaf-height', type=float, help='um: sub-cells this short are standard-cell rows, exempt from the aspect check')
     ap.add_argument('--cds-lib', default='cds.lib')
     a = ap.parse_args(argv)
     pairs = [tuple(p.split(':')) for p in a.pairs.split(',')] if a.pairs else []
@@ -58,7 +59,7 @@ def main(argv=None):
     groups = dict(g.split('=', 1) for g in a.groups.split(',')) if a.groups else None
     run = LG.batch_runner(cds_lib=str(Path(a.cds_lib).resolve()))
     cellbox, insts = LA.read_layout(run, a.lib, a.cell, a.view)
-    f = LA.audit(cellbox, insts, a.area_budget, pairs, groups, a.device_re)
+    f = LA.audit(cellbox, insts, a.area_budget, pairs, groups, a.device_re, lib=a.lib, leaf_height=a.leaf_height)
     print(LA.format_findings(f))
     return 1 if any(x[0] == 'FAIL' for x in f) else 0
 
