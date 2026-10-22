@@ -88,6 +88,35 @@ class PostLayoutReport:
 # netlist handling (pure)
 # ---------------------------------------------------------------------------
 
+def splice_nf(cdl: str, nf: dict[str, str]) -> str:
+    """Append ``nf=`` on MOS lines whose schematic instance has it and the CDL dropped it.
+
+    auCdl prints total ``w`` and omits ``nf``. Spectre then treats that width as one finger
+    and rejects it (CMI-2942) when it is outside the model's wmax. LVS must keep the
+    original CDL; this copy is for the schematic simulation only.
+    """
+    out = []
+    for line in cdl.splitlines():
+        toks = line.split()
+        name = toks[0] if toks else ''
+        if name[:1] in 'Mm' and name in nf and not re.search(r'(?i)\bnf=', line):
+            line = '%s nf=%s' % (line, nf[name])
+        out.append(line)
+    text = '\n'.join(out)
+    return text + ('\n' if cdl.endswith('\n') else '')
+
+
+def parse_nf_print(text: str) -> dict[str, str]:
+    out = {}
+    for line in text.splitlines():
+        if not line.startswith('NF|'):
+            continue
+        parts = line.split('|')
+        if len(parts) >= 3 and parts[1]:
+            out[parts[1]] = parts[2].strip().strip('"')
+    return out
+
+
 def subckt_ports(netlist: str, cell: str) -> list[str] | None:
     """Ports of ``.SUBCKT cell`` (continuation lines joined), or None if absent."""
     text = re.sub(r"\n\+", " ", netlist)
@@ -188,7 +217,8 @@ def _run_variant(host: VerifyHost, cfg: VerifyConfig, template: str, v: Variant,
 def compare(host: VerifyHost, cfg: VerifyConfig, *, cell: str, template: str, cdl: str,
             pex_netlists: dict[str, str], run_dir: str) -> PostLayoutReport:
     """Run *template* with the schematic CDL and with every extracted corner."""
-    variants = [Variant("schematic", cdl)]
+    spectre_cdl = cdl + '.spectre'
+    variants = [Variant('schematic', spectre_cdl if host.exists(spectre_cdl) else cdl)]
     sch_ports = subckt_ports(host.read_text(cdl) or "", cell)
     for corner, path in pex_netlists.items():
         v = Variant(corner, path)

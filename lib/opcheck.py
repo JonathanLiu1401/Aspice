@@ -427,6 +427,14 @@ def prepare_deck(text, base=None, section=None, temp=None, at=None, keep_analyse
     return body.rstrip('\n') + '\n' + '\n'.join(extra) + '\n', nl
 
 
+def corner_name(sec, temp, text):
+    """Label for one opcheck point. A deck that already says section=fs is not 'nominal'."""
+    if not sec:
+        m = re.search(r'^\s*include\s+"[^"]+"\s+section\s*=\s*(\w+)', text, re.M | re.I)
+        sec = m.group(1) if m else None
+    return '/'.join(x for x in (sec, None if temp is None else '%gC' % temp) if x) or 'nominal'
+
+
 def audit(netlist, rules=None, sections=(None,), temps=(None,), at=None, workdir=None,
           keep_analyses=False):
     """Run the oppoint audit. ``netlist``: path or text of a Spectre deck (an ADE
@@ -440,7 +448,7 @@ def audit(netlist, rules=None, sections=(None,), temps=(None,), at=None, workdir
             deck, nl = prepare_deck(text, base, sec, t, at, keep_analyses)
             vdd = rules.vdd or supply_voltage(nl)
             r = CD.run_spectre(deck, workdir=workdir, timeout=3600)
-            corner = '/'.join(x for x in (sec, None if t is None else '%gC' % t) if x) or 'nominal'
+            corner = corner_name(sec, t, text)
             if not r.ok:
                 report['ok'] = False
                 report['findings'].append(asdict(Finding(

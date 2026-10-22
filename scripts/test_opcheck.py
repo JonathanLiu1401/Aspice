@@ -119,6 +119,12 @@ class T(unittest.TestCase):
         self.assertIn('aspice_opck_temp options temp=125', deck)
         self.assertIn('infotimes=[1e-09] infoname=%s' % OP.TINFO, deck)
 
+    def test_corner_name_uses_the_deck_section(self):
+        text = 'include "gpdk045.scs" section=fs\n'
+        self.assertEqual(OP.corner_name(None, None, text), 'fs')
+        self.assertEqual(OP.corner_name(None, 27, text), 'fs/27C')
+        self.assertEqual(OP.corner_name('tt', None, text), 'tt')
+
     def test_unequal_pair_and_paren_sizes(self):
         nl = SN.parse_netlist(DECK.replace('M2 (out inn tail vss) nch w=2u', 'M2 (out inn tail vss) nch w=(6u)')
                               .replace('M1 (x inp tail vss) nch w=2u', 'M1 (x inp tail vss) nch w=(2u)'))
