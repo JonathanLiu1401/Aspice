@@ -68,7 +68,7 @@ Layout search uses the technique cards by keyword with no extra install. To add 
 rank, with [Ollama](https://ollama.com/) already running locally:
 
 ```bash
-ollama pull nomic-embed-text
+ollama pull qwen3-embedding:8b
 python scripts/layout_search.py --build
 python scripts/layout_search.py "shield the CDAC top plate"
 ```
